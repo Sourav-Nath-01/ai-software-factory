@@ -169,7 +169,6 @@ export default function Build() {
     }
     if (ev.type === 'log'      && ev.message) addLog(`   ${ev.message}`)
     if (ev.type === 'error'    && ev.message) { setError(ev.message); addLog(`❌ ${ev.message}`); setPhase('done') }
-    if (ev.type === 'complete' && runId)      { addLog('🎉 Pipeline complete!'); setPhase('done'); setTimeout(() => navigate(`/result/${runId}`), 1500) }
   }
 
   const handleSubmit = async () => {
@@ -197,7 +196,18 @@ export default function Build() {
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/${run_id}`)
       wsRef.current = ws
-      ws.onmessage = e => { try { handleEvent(JSON.parse(e.data) as PipelineEvent) } catch { /**/ } }
+      ws.onmessage = e => { 
+        try { 
+          const ev = JSON.parse(e.data) as PipelineEvent
+          if (ev.type === 'complete') {
+            addLog('🎉 Pipeline complete!')
+            setPhase('done')
+            setTimeout(() => navigate(`/result/${run_id}`), 1500)
+          } else {
+            handleEvent(ev)
+          }
+        } catch { /**/ } 
+      }
       ws.onerror = () => { setError('WebSocket connection error'); setPhase('done') }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to start pipeline')
