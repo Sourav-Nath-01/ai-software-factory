@@ -127,7 +127,7 @@ React Dashboard         queue.Queue → asyncio WS
 ### Web UI (Recommended)
 
 ```bash
-git clone https://github.com/sourav-nath/ai-software-factory.git
+git clone https://github.com/Sourav-Nath-01/ai-software-factory.git
 cd ai-software-factory
 ./run.sh
 ```

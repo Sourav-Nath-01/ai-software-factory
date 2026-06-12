@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import type { AppStats } from '../types'
 
-const GITHUB_URL = 'https://github.com/sourav-nath/ai-software-factory'
+const GITHUB_URL = 'https://github.com/Sourav-Nath-01/ai-software-factory'
 
 const AGENTS = [
   { icon: '🏗️', role: 'Architect', name: 'Planner', desc: 'Designs system architecture, file structure, and API contracts.' },
