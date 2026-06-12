@@ -96,7 +96,7 @@ class Severity(str, Enum):
 class ReviewComment(BaseModel):
     """A single review comment / issue found."""
     file_path: str = Field(description="File where the issue was found")
-    severity: Severity = Field(description="Issue severity")
+    severity: str = Field(description="Issue severity (critical, warning, info)")
     category: str = Field(
         description="Category: bug, security, performance, style, architecture"
     )
