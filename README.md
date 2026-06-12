@@ -13,6 +13,7 @@ short_description: 7 AI agents collaborate to build your software end-to-end
 
 > **A production-ready, multi-agent AI pipeline that automatically plans, codes, reviews, tests, and deploys software — powered by free-tier LLMs (Gemini / Groq).**
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Try%20it%20on%20Hugging%20Face-ffcc00?logo=huggingface)](https://huggingface.co/spaces/SouravNath/ai-software-factory)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green?logo=fastapi)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18+-61DAFB?logo=react)](https://reactjs.org)
