@@ -57,15 +57,18 @@ class RunStore:
         )
         runs = []
         for f in files[:limit]:
-            data = json.loads(f.read_text())
-            runs.append({
-                "run_id": data["run_id"],
-                "prompt": data["prompt"][:100],
-                "status": data["status"],
-                "model": data["model"],
-                "created_at": data["created_at"],
-                "metrics": data.get("metrics"),
-            })
+            try:
+                data = json.loads(f.read_text())
+                runs.append({
+                    "run_id": data.get("run_id", f.stem),
+                    "prompt": data.get("prompt", "")[:100],
+                    "status": data.get("status", "unknown"),
+                    "model": data.get("model", "unknown"),
+                    "created_at": data.get("created_at", ""),
+                    "metrics": data.get("metrics", {}),
+                })
+            except Exception:
+                continue
         return runs
 
     def _save(self, run_id: str, data: dict):
