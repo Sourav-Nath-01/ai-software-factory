@@ -22,9 +22,21 @@ short_description: 7 AI agents collaborate to build your software end-to-end
 
 ---
 
+## 🌟 Enterprise-Grade Features
+
+We recently upgraded this project from a prototype to a production-ready architecture, solving the most common issues in multi-agent systems:
+
+1. **Model Context Protocol (MCP) Grounding:** The pipeline runs real deterministic CLI tools (`bandit` for security, `flake8` for syntax) and injects the output into the AI's context. This eliminates LLM hallucination during code reviews.
+2. **Proactive Token Bucket Rate Limiting:** Prevent `429 Too Many Requests` API errors. The system estimates payload tokens and sleeps *before* making the API call if the bucket capacity is low, dynamically handling Free-Tier API limits.
+3. **Human-in-the-Loop (HITL) Checkpoints:** The pipeline gracefully pauses via zero-CPU `threading.Event()` after the Architecture Planning stage, presenting a UI modal for the user to Approve or Reject the blueprint before expensive code generation begins.
+4. **Graceful Pipeline Cancellation:** Click "Stop" at any time. The background thread checks for a cancellation signal at stage boundaries and aborts cleanly without leaving corrupted state.
+5. **Interactive Diff Viewer:** The backend stores snapshots of the raw generated codebase, allowing users to view side-by-side git-style diffs of exactly what the Reviewer Agent fixed.
+
+---
+
 ## 📊 Benchmark Results
 
-**One full real pipeline run on Groq Llama 3.3 70B (free tier) — June 12, 2025**
+**One full real pipeline run on Groq Llama 3.3 70B (free tier)**
 
 Prompt: *"Build a REST API for a todo app with FastAPI, SQLite, JWT auth, CRUD operations, and proper error handling"*
 
@@ -35,50 +47,7 @@ Prompt: *"Build a REST API for a todo app with FastAPI, SQLite, JWT auth, CRUD o
 | **Security issues found** | **13 issues** across 2 review iterations |
 | **Issues fixed** | **13 issues fixed** by the Improver agent |
 | **Review iterations** | **2 cycles** (Reviewer → Improver → Reviewer loop) |
-| **Test fix iterations** | **2 attempts** (generated tests, analyzed failures, patched) |
 | **Total pipeline duration** | **3 minutes 42 seconds** |
-| **Model** | `groq/llama-3.3-70b-versatile` (free tier) |
-
-### Per-Stage Timing Breakdown
-
-| Stage | Agent | Duration |
-|---|---|---|
-| 🏗️ Planning | Architect | 2.8s |
-| 💻 Code Generation | Software Engineer | 6.0s |
-| 🔍 Code Review (×2) | Senior Reviewer | 21.9s |
-| ✨ Code Improvement (×2) | Improvement Specialist | 9.4s |
-| 🧪 Test Generation | QA Engineer | 23.8s |
-| ▶️ Test Execution (×2) | QA Analyst + Sandbox | 34.4s |
-| 🚀 Deployment Config | DevOps Engineer | 24.0s |
-| **Total** | **7 agents** | **3m 42s** |
-
-> **Notable:** The Reviewer found plain-text password storage and missing JWT expiry (OWASP Top 10 issues) in iteration 1. The Improver fixed all 6 issues. Iteration 2 found 7 more edge-case issues — all fixed. This is the core value of the multi-agent review loop.
-
-### Orchestration Reliability (Demo Mode — verified by test suite)
-
-| Metric | Value |
-|---|---|
-| Test suite | **32/32 tests pass** (`pytest tests/ -v`) |
-| Pipeline completion rate | **100%** (3/3 demo runs) |
-| Orchestration overhead (mock) | **27–29s** for 7 stages |
-
----
-
-## 🌟 Engineering Highlights
-
-Building a reliable multi-agent system on free-tier LLMs required solving four major distributed systems problems:
-
-### 1. Custom Orchestration Engine (No Framework Lock-in)
-Heavy frameworks like `CrewAI` freeze and crash with free-tier models due to rigid tool-calling expectations. This project implements a **lightweight custom orchestrator** built on direct [LiteLLM](https://github.com/BerriAI/litellm) calls, reducing pipeline failures from ~60% to near-zero on Gemini and Groq free tiers.
-
-### 2. State-Based Memory (Pydantic Contracts)
-Traditional conversational memory causes token bloat and hallucination loops. This pipeline uses **strict JSON contracts** (`ProjectPlan → CodeBase → ReviewReport → TestResult`) passed between agents. Each agent sees only what it needs — the Coder sees only the Plan, the Reviewer sees only the Code.
-
-### 3. Fuzzy JSON Repair (`json_repair`)
-Smaller models (Llama 8B, Gemini Flash Lite) frequently emit malformed JSON inside large code blocks. The pipeline integrates a **dynamic JSON repair layer** that handles trailing commas, unescaped quotes, missing brackets — without crashing.
-
-### 4. Rate-Limit Resilience & Auto-Backoff
-Free tiers impose strict limits (Gemini: 15 RPM, Groq: 30K TPM). The orchestrator **intercepts `RESOURCE_EXHAUSTED` and `429` errors**, regex-parses the required retry delay from the error message, and implements automatic exponential backoff — ensuring no request is lost mid-generation.
 
 ---
 
