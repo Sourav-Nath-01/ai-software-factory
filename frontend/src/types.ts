@@ -31,6 +31,20 @@ export interface RunResult extends RunSummary {
   error?: string;
 }
 
+// ── HITL Types ────────────────────────────────────────────────
+// Defined before PipelineEvent so it can be referenced inline.
+
+export interface HITLPlan {
+  project_name: string;
+  description: string;
+  tech_stack: string[];
+  file_structure: string[];
+  modules: string[];
+  endpoints: { method: string; path: string; description: string }[];
+}
+
+// ── Pipeline Event Types ──────────────────────────────────────
+
 export type PipelineEventType =
   | 'pipeline_start'
   | 'stage_start'
@@ -38,7 +52,10 @@ export type PipelineEventType =
   | 'log'
   | 'complete'
   | 'error'
-  | 'ping';
+  | 'ping'
+  | 'hitl_checkpoint'
+  | 'hitl_approved'
+  | 'cancelled';
 
 export interface PipelineEvent {
   type: PipelineEventType;
@@ -50,6 +67,7 @@ export interface PipelineEvent {
   message?: string;
   metrics?: RunMetrics;
   prompt?: string;
+  plan?: HITLPlan;  // present on hitl_checkpoint events
 }
 
 export interface StageState {
@@ -66,4 +84,22 @@ export interface AppStats {
   successful_runs: number;
   success_rate: number;
   avg_files_generated: number;
+}
+
+// ── Diff Viewer Types ─────────────────────────────────────────
+
+export interface FileDiff {
+  file_path: string;
+  original_content: string;
+  improved_content: string;
+  is_new: boolean;
+  is_unchanged: boolean;
+}
+
+export interface DiffResponse {
+  run_id: string;
+  files_changed: number;
+  files_added: number;
+  files_unchanged: number;
+  diffs: FileDiff[];
 }

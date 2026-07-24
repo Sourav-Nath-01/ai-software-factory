@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue as q_module
+import threading
 from typing import Dict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -12,6 +13,17 @@ router = APIRouter(tags=["websocket"])
 
 # run_id -> Queue[dict | None]  (None = sentinel = done)
 active_queues: Dict[str, q_module.Queue] = {}
+
+# ── Human-in-the-Loop coordination ──────────────────────────
+# run_id -> threading.Event  (set when user approves/rejects)
+hitl_events: Dict[str, threading.Event] = {}
+
+# run_id -> {"approved": bool, "reason": str}
+hitl_decisions: Dict[str, dict] = {}
+
+# ── Pipeline cancellation ───────────────────────────────
+# run_id -> threading.Event  (set when user clicks Stop)
+cancel_events: Dict[str, threading.Event] = {}
 
 
 @router.websocket("/ws/{run_id}")

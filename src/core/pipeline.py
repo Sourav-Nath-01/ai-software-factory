@@ -43,6 +43,8 @@ from src.core.models import (
 )
 from src.core.sandbox import run_sandboxed
 from src.core.memory import coder_memory, reviewer_memory
+from src.core.mcp_toolkit import mcp_toolkit
+from src.core.rate_limiter import get_rate_limiter
 from src.tools.file_writer import write_project_files
 
 console = Console()
@@ -87,6 +89,12 @@ def _safe_json(text: str, fallback: dict | None = None) -> dict:
         return fallback or {}
 
 
+# ── Custom exceptions ─────────────────────────────────────────
+
+class PipelineCancelledError(RuntimeError):
+    """Raised when the user explicitly cancels a running pipeline."""
+
+
 # ── Pipeline ──────────────────────────────────────────────────
 
 class Pipeline:
@@ -98,6 +106,8 @@ class Pipeline:
         api_key: str = "",
         demo: bool = False,
         event_callback: Optional[Callable[[dict], None]] = None,
+        run_id: Optional[str] = None,
+        cancel_event: Optional[object] = None,
         # legacy param kept for backward compat (ignored when model/api_key used)
         llm=None,
     ):
@@ -106,6 +116,8 @@ class Pipeline:
         self._model = model
         self._api_key = api_key
         self._mock_llm = None
+        self._run_id = run_id  # used for HITL coordination
+        self._cancel_event = cancel_event  # threading.Event, set to abort pipeline
 
         if demo:
             from src.core.mock_llm import MockLLM
@@ -116,6 +128,19 @@ class Pipeline:
         self._output_dir: Path | None = None
         self._issues_found = 0
         self._issues_fixed = 0
+
+    # ── Cancellation support ──────────────────────────────
+
+    def _check_cancelled(self):
+        """Raise PipelineCancelledError if the user clicked Stop.
+
+        Called at every stage boundary — zero overhead when not cancelled
+        (threading.Event.is_set() is a simple flag check).
+        """
+        if self._cancel_event and self._cancel_event.is_set():
+            self._log("🛑 Pipeline cancelled by user.")
+            self._emit({"type": "cancelled", "message": "Pipeline stopped by user."})
+            raise PipelineCancelledError("Pipeline cancelled by user.")
 
     # ── Core LLM call (bypasses CrewAI) ──────────────────────
 
@@ -155,6 +180,17 @@ class Pipeline:
         last_exc = None
         for attempt in range(max_retries):
             try:
+                # ── Proactive rate limiting (token bucket) ──────────────
+                # Estimate payload size and sleep proactively before sending
+                # to avoid 429 errors entirely (instead of reacting to them)
+                if not self.demo:
+                    payload_text = system + user
+                    bucket = get_rate_limiter(model)
+                    wait_secs = bucket.consume(payload_text)
+                    if wait_secs > 0.5:
+                        msg = f"⏳ Rate limiter: waited {wait_secs:.1f}s proactively"
+                        self._log(msg)
+
                 response = litellm.completion(
                     model=model,
                     messages=[
@@ -185,11 +221,11 @@ class Pipeline:
 
                 if is_rate_limit:
                     # Daily quota exhausted — retrying won't help
-                    if any(w in err_lower for w in ("per_day", "daily", "day quota", "requests per day")):
+                    if any(w in err_lower for w in ("per_day", "perday", "daily", "day quota", "requests per day")):
                         raise RuntimeError(
                             f"Daily API quota exhausted for {model}. "
-                            "Free tier allows ~200 requests/day. "
-                            "Wait until midnight UTC, or switch to Groq (llama-3.1-8b-instant) which resets hourly."
+                            "Free tier limit reached. Please use a different API key, "
+                            "wait until tomorrow, or switch to groq/llama-3.1-8b-instant."
                         ) from e
 
                     # Per-minute rate limit — wait and retry
@@ -238,9 +274,16 @@ class Pipeline:
 
         try:
             self._run_planning()
+            self._check_cancelled()           # ✔ stop check after Planning
+            self._run_hitl_checkpoint()       # ✔ HITL: pause for user to approve architecture
+            self._check_cancelled()           # ✔ stop check after HITL
             self._run_coding()
+            self._check_cancelled()           # ✔ stop check after Coding
+            self._run_security_scan()         # ✔ Dep scan before review
             self._run_review_improve_loop()
+            self._check_cancelled()           # ✔ stop check after Review
             self._run_testing()
+            self._check_cancelled()           # ✔ stop check after Testing
             self._run_test_fix_loop()
             self._run_deployment()
             self._write_output()
@@ -266,6 +309,12 @@ class Pipeline:
                     self.state.codebase.summary(),
                     {"prompt": user_request, "tech": ",".join(self.state.plan.tech_stack)},
                 )
+
+        except PipelineCancelledError:
+            self.state.current_stage = PipelineStage.FAILED
+            self._emit({"type": "cancelled", "message": "Pipeline stopped by user."})
+            console.print(Panel("[yellow bold]Pipeline Stopped[/yellow bold]\n\nCancelled by user.", border_style="yellow"))
+            raise  # propagate so runs.py can mark status as 'cancelled'
 
         except Exception as e:
             self.state.current_stage = PipelineStage.FAILED
@@ -340,6 +389,53 @@ class Pipeline:
                     "duration": round(time.time() - t0, 1),
                     "data": {"tech_stack": ", ".join(self.state.plan.tech_stack[:3])}})
 
+    def _run_hitl_checkpoint(self):
+        """Human-in-the-Loop: pause after Planning so the user can approve the architecture.
+
+        Only activates for real LLM runs (non-demo) started through the API.
+        - CLI mode (no run_id): skipped — no WebSocket to communicate with
+        - Demo mode: skipped — automated demo runs should complete without human input
+        - Real API run: emits hitl_checkpoint event and blocks until user approves
+        """
+        if not self._run_id or self.demo:
+            return  # Skip HITL in CLI mode or Demo mode
+
+        import threading as _threading
+        from backend.ws import hitl_events, hitl_decisions
+
+        plan = self.state.plan
+        # Emit the checkpoint event to the frontend
+        self._emit({
+            "type": "hitl_checkpoint",
+            "stage": "Architecture Approval",
+            "plan": {
+                "project_name":   plan.project_name,
+                "description":    plan.description,
+                "tech_stack":     plan.tech_stack,
+                "file_structure": plan.file_structure[:20],  # cap for WS payload
+                "modules":        plan.modules[:10],
+                "endpoints":      [{"method": e.method, "path": e.path, "description": e.description} for e in plan.endpoints[:8]],
+            }
+        })
+        self._log("👤 Waiting for human approval of architecture plan...")
+        console.print("\n  [bold yellow]⏸ HITL Checkpoint[/bold yellow] — waiting for human to approve architecture...")
+
+        # Block until the frontend POSTs to /api/runs/{run_id}/approve
+        event: _threading.Event | None = hitl_events.get(self._run_id)
+        if event:
+            approved = event.wait(timeout=300)  # wait up to 5 minutes
+            if not approved:
+                raise RuntimeError("HITL timeout: user did not approve architecture within 5 minutes.")
+
+            decision = hitl_decisions.get(self._run_id, {})
+            if not decision.get("approved", True):
+                reason = decision.get("reason", "User rejected the architecture.")
+                raise RuntimeError(f"Pipeline aborted by user: {reason}")
+
+            self._log("✅ Architecture approved by user — proceeding to code generation.")
+            console.print("  [bold green]✔ Architecture approved — continuing pipeline.[/bold green]")
+            self._emit({"type": "hitl_approved", "stage": "Architecture Approval"})
+
     def _run_coding(self):
         t0 = time.time()
         self.state.current_stage = PipelineStage.CODING
@@ -364,6 +460,40 @@ class Pipeline:
         self._emit({"type": "stage_complete", "stage": "Code Generation", "icon": "💻",
                     "duration": round(time.time() - t0, 1), "data": {"files": count}})
 
+        # ── Save initial codebase snapshot for diff viewer ───────────────
+        if self._run_id:
+            try:
+                from backend.store.run_store import run_store
+                initial_files = [
+                    {"file_path": f.file_path, "content": f.content, "language": f.language}
+                    for f in self.state.codebase.files
+                ]
+                run_store.update_initial_codebase(self._run_id, initial_files)
+            except Exception:
+                pass  # non-critical; diff viewer will show empty initial state
+
+    def _run_security_scan(self):
+        """Run pip-audit on generated requirements.txt to find vulnerable dependencies."""
+        # Find any requirements.txt in the codebase
+        req_file = self.state.codebase.get_file("requirements.txt")
+        if not req_file or not req_file.content.strip():
+            return
+
+        self._log("🔒 MCP: Running pip-audit on requirements.txt...")
+        self._emit({"type": "log", "message": "🔒 Scanning dependencies for vulnerabilities (pip-audit)..."})
+
+        dep_report = mcp_toolkit.run_dependency_audit(req_file.content)
+        if dep_report.vuln_packages:
+            self._log(
+                f"⚠ pip-audit found {len(dep_report.vuln_packages)} vulnerable packages — "
+                f"Reviewer agent will be informed."
+            )
+            # Persist for the next review loop to consume
+            self.state._security_audit = dep_report.as_context_string()
+        else:
+            self._log("✅ pip-audit: No known vulnerabilities found in dependencies.")
+            self.state._security_audit = ""
+
     def _run_review_improve_loop(self):
         for iteration in range(1, settings.max_review_iterations + 1):
             t0 = time.time()
@@ -372,10 +502,38 @@ class Pipeline:
             self._emit({"type": "stage_start", "stage": "Code Review", "icon": "🔍", "meta": f"Iteration {iteration}"})
 
             codebase_json = self._truncate(self.state.codebase.model_dump_json(indent=2))
+
+            # ── MCP Toolkit: inject real static analysis before LLM call ──
+            # Collect all Python files from the codebase to run tools against
+            python_files = {
+                f.file_path: f.content
+                for f in self.state.codebase.files
+                if f.file_path.endswith(".py")
+            }
+            mcp_context = ""
+            # Only run MCP tools when there are enough Python files to make it
+            # worthwhile (avoids subprocess overhead on tiny codebases) and
+            # only in non-demo mode (demo uses mock LLM anyway)
+            if len(python_files) >= 2 and not self.demo:
+                self._log("🔧 MCP: Running bandit + flake8 on generated code...")
+                tool_report = mcp_toolkit.run_code_review(python_files)
+                mcp_context = "\n\n" + tool_report.as_context_string()
+                if tool_report.total_issues > 0:
+                    self._log(f"🔧 MCP tools found {tool_report.total_issues} real issues to inform the Reviewer.")
+
+            # Add security audit results from pip-audit (if available)
+            security_audit = getattr(self.state, "_security_audit", "")
+            if security_audit:
+                mcp_context += "\n\n" + security_audit
+
+            review_user_prompt = REVIEW_TASK_DESCRIPTION.format(codebase=codebase_json)
+            if mcp_context:
+                review_user_prompt += mcp_context
+
             with console.status("[bold cyan]  Reviewer agent analyzing...[/bold cyan]", spinner="dots"):
                 result = self._call_llm(
                     system=REVIEWER_BACKSTORY,
-                    user=REVIEW_TASK_DESCRIPTION.format(codebase=codebase_json),
+                    user=review_user_prompt,
                 )
 
             data = _safe_json(result, {"comments": [], "overall_quality": "good", "summary": ""})

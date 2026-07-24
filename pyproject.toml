@@ -34,6 +34,11 @@ web = [
 memory = [
     "chromadb>=0.5.0",
 ]
+mcp_tools = [
+    "bandit>=1.7.0",       # Python security linter (MCP tool for Reviewer agent)
+    "flake8>=7.0.0",       # Style linter (MCP tool for Reviewer agent)
+    "pip-audit>=2.7.0",    # Dependency vulnerability scanner
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

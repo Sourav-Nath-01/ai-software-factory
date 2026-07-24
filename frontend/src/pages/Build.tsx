@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { PipelineEvent, StageState } from '../types'
+import type { PipelineEvent, StageState, HITLPlan } from '../types'
 
 interface ModelOption {
   provider: string
@@ -112,6 +112,14 @@ export default function Build() {
   const [elapsed,    setElapsed]    = useState(0)       // total seconds running
   const [stageTimer, setStageTimer] = useState(0)      // seconds in current stage
 
+  // HITL state
+  const [hitlPlan,   setHitlPlan]   = useState<HITLPlan | null>(null)
+  const [hitlRunId,  setHitlRunId]  = useState<string | null>(null)
+  const [hitlLoading, setHitlLoading] = useState(false)
+
+  // Stop/cancel state
+  const [stopping, setStopping] = useState(false)
+
   const logRef     = useRef<HTMLDivElement>(null)
   const wsRef      = useRef<WebSocket | null>(null)
   const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -160,6 +168,30 @@ export default function Build() {
 
   const handleEvent = (ev: PipelineEvent) => {
     if (ev.type === 'ping') return
+    // HITL checkpoint — show approval modal
+    if (ev.type === 'hitl_checkpoint') {
+      const plan = ev.plan
+      if (plan) {
+        setHitlPlan(plan)
+      }
+      addLog('⏸️ Pipeline paused — waiting for your architecture approval')
+      return
+    }
+    // HITL approved — dismiss modal and continue
+    if (ev.type === 'hitl_approved') {
+      setHitlPlan(null)
+      setHitlLoading(false)
+      addLog('✅ Architecture approved — continuing to code generation')
+      return
+    }
+    // Pipeline was cancelled by user
+    if (ev.type === 'cancelled') {
+      setStopping(false)
+      setError('Pipeline stopped by user.')
+      setPhase('done')
+      addLog('🛑 Pipeline stopped by user')
+      return
+    }
     if (ev.type === 'stage_start'    && ev.stage) { updateStage(ev.stage, { status: 'running', message: ev.meta }); addLog(`▶ ${ev.stage}${ev.meta ? ` (${ev.meta})` : ''}`) }
     if (ev.type === 'stage_complete' && ev.stage) {
       const dur = ev.duration ? ` [${ev.duration}s]` : ''
@@ -193,6 +225,7 @@ export default function Build() {
       })
       const { run_id } = await res.json()
       setRunId(run_id)
+      setHitlRunId(run_id)
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/${run_id}`)
       wsRef.current = ws
@@ -216,6 +249,123 @@ export default function Build() {
   }
 
   useEffect(() => () => { wsRef.current?.close() }, [])
+
+  // HITL handlers
+  const handleHITLDecision = async (approved: boolean) => {
+    if (!hitlRunId) return
+    setHitlLoading(true)
+    try {
+      await fetch(`/api/runs/${hitlRunId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved, reason: approved ? '' : 'User rejected the architecture plan.' }),
+      })
+      if (!approved) {
+        setHitlPlan(null)
+        setError('You rejected the architecture. Pipeline stopped.')
+        setPhase('done')
+      }
+      // If approved, the WebSocket will receive hitl_approved event and close the modal
+    } catch (e) {
+      setHitlLoading(false)
+    }
+  }
+
+  // HITL Approval Modal (shown during running phase when hitlPlan is set)
+  const HITLModal = hitlPlan ? (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }}>
+      <div style={{
+        background: 'var(--bg2)', border: '1px solid var(--border)',
+        borderRadius: 16, padding: 32, maxWidth: 620, width: '100%',
+        maxHeight: '85vh', overflowY: 'auto',
+        boxShadow: '0 24px 80px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <span style={{ fontSize: 28 }}>👤</span>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 20 }}>Architecture Review</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Human-in-the-Loop Checkpoint — approve before code generation starts</div>
+          </div>
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0' }} />
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{hitlPlan.project_name}</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6 }}>{hitlPlan.description}</div>
+        </div>
+
+        {hitlPlan.tech_stack.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Tech Stack</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {hitlPlan.tech_stack.map(t => (
+                <span key={t} className="badge badge-purple" style={{ fontSize: 11 }}>{t}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {hitlPlan.file_structure.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+              Files to generate ({hitlPlan.file_structure.length})
+            </div>
+            <div style={{
+              background: 'var(--bg3)', borderRadius: 8, padding: '10px 14px',
+              fontFamily: 'var(--font-mono)', fontSize: 12, maxHeight: 160, overflowY: 'auto',
+            }}>
+              {hitlPlan.file_structure.map(f => (
+                <div key={f} style={{ color: 'var(--green)', marginBottom: 2 }}>📄 {f}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {hitlPlan.endpoints.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>API Endpoints</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {hitlPlan.endpoints.map((e, i) => (
+                <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 12 }}>
+                  <span className={`badge ${e.method === 'GET' ? 'badge-green' : e.method === 'POST' ? 'badge-yellow' : 'badge-purple'}`} style={{ fontSize: 10, minWidth: 44, textAlign: 'center' }}>{e.method}</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>{e.path}</span>
+                  <span style={{ color: 'var(--text-muted)', flex: 1 }}>{e.description}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
+          <button
+            id="hitl-approve-btn"
+            className="btn btn-primary"
+            style={{ flex: 1, justifyContent: 'center', fontSize: 15, padding: '13px' }}
+            disabled={hitlLoading}
+            onClick={() => handleHITLDecision(true)}
+          >
+            {hitlLoading ? '⌛ Processing...' : '✅ Approve — Start Coding'}
+          </button>
+          <button
+            id="hitl-reject-btn"
+            className="btn btn-ghost"
+            style={{ padding: '13px 20px', color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }}
+            disabled={hitlLoading}
+            onClick={() => handleHITLDecision(false)}
+          >
+            ✗ Reject
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null
+
+
 
   if (phase === 'form') {
     return (
@@ -347,6 +497,7 @@ export default function Build() {
 
   return (
     <div className="page">
+      {HITLModal}
       <nav className="navbar">
         <div className="navbar-logo" onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>
           <div className="logo-icon">🏭</div>
@@ -362,6 +513,35 @@ export default function Build() {
               <span style={{ fontSize: 13, color: 'var(--text-muted)', marginLeft: 12 }}>
                 {completedCount}/7 stages done
               </span>
+              <button
+                id="stop-pipeline-btn"
+                onClick={async () => {
+                  if (!runId || stopping) return
+                  setStopping(true)
+                  addLog('🛑 Stop requested — finishing current stage...')
+                  try {
+                    await fetch(`/api/runs/${runId}/cancel`, { method: 'POST' })
+                  } catch { setStopping(false) }
+                }}
+                disabled={stopping}
+                style={{
+                  marginLeft: 16,
+                  padding: '5px 14px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(239,68,68,0.4)',
+                  background: stopping ? 'rgba(239,68,68,0.08)' : 'rgba(239,68,68,0.12)',
+                  color: stopping ? 'var(--text-muted)' : '#f87171',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: stopping ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  transition: 'all 0.2s',
+                }}
+              >
+                {stopping ? '⌛ Stopping…' : '⏹ Stop'}
+              </button>
             </>
           )}
           {phase === 'done' && !error && <span className="badge badge-green">✓ Complete in {fmtTime(elapsed)}</span>}

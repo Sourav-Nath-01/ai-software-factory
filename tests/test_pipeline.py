@@ -229,9 +229,14 @@ class TestAPI:
         data = r.json()
         assert "run_id" in data and data["status"] == "running"
 
-    def _wait_complete(self, client, run_id: str, timeout: int = 30):
-        for _ in range(timeout * 2):
-            time.sleep(0.5)
+    def _wait_complete(self, client, run_id: str, timeout: int = 120):
+        """Poll until the run reaches a terminal state or timeout expires.
+
+        Timeout increased to 120s to handle the full demo pipeline which
+        now includes security scanning (pip-audit) and multiple review stages.
+        """
+        for _ in range(timeout):
+            time.sleep(1)
             r = client.get(f"/api/runs/{run_id}")
             if r.status_code == 200 and r.json()["status"] in ("complete","failed"):
                 return r.json()

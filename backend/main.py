@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.routes.runs import router as runs_router
+from backend.routes.hitl import router as hitl_router
 from backend.ws import router as ws_router
 
 load_dotenv()
@@ -20,6 +21,14 @@ async def lifespan(app: FastAPI):
     # Ensure output dirs exist
     Path("output/runs").mkdir(parents=True, exist_ok=True)
     Path("output/memory").mkdir(parents=True, exist_ok=True)
+    # Mark any 'running' runs from a previous crashed/killed server as failed
+    from backend.store.run_store import run_store
+    cleaned = run_store.cleanup_stale_runs()
+    if cleaned:
+        import logging
+        logging.getLogger("uvicorn").info(
+            f"Startup cleanup: marked {cleaned} stale 'running' run(s) as failed."
+        )
     yield
 
 
@@ -41,6 +50,7 @@ app.add_middleware(
 
 # ── Routers ──────────────────────────────────────────────────
 app.include_router(runs_router)
+app.include_router(hitl_router)
 app.include_router(ws_router)
 
 
@@ -49,10 +59,16 @@ app.include_router(ws_router)
 async def health():
     from src.core.sandbox import DOCKER_AVAILABLE
     from src.core.memory import _CHROMADB_AVAILABLE
+    from src.core.mcp_toolkit import BANDIT_AVAILABLE, FLAKE8_AVAILABLE, PIPIT_AVAILABLE
     return {
         "status": "ok",
         "docker_sandbox": DOCKER_AVAILABLE,
         "vector_memory": _CHROMADB_AVAILABLE,
+        "mcp_tools": {
+            "bandit":    BANDIT_AVAILABLE,
+            "flake8":    FLAKE8_AVAILABLE,
+            "pip_audit": PIPIT_AVAILABLE,
+        },
     }
 
 

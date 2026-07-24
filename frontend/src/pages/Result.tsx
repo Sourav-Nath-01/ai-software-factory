@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import type { RunResult, CodeFile } from '../types'
+import type { RunResult, CodeFile, DiffResponse, FileDiff } from '../types'
 
 // Language → highlight.js alias
 const LANG_MAP: Record<string, string> = {
@@ -38,6 +38,11 @@ export default function Result() {
   const [loading, setLoading] = useState(true)
   const [hljs, setHljs] = useState<typeof import('highlight.js').default | null>(null)
 
+  // Diff viewer state
+  const [diffData, setDiffData] = useState<DiffResponse | null>(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+  const [showDiff, setShowDiff] = useState(false)
+
   // Load highlight.js + theme lazily
   useEffect(() => {
     import('highlight.js').then(m => setHljs(m.default))
@@ -73,6 +78,72 @@ export default function Result() {
   })()
 
   const handleDownload = () => { window.open(`/api/runs/${runId}/download`, '_blank') }
+
+  const handleLoadDiff = async () => {
+    if (!runId || diffData) { setShowDiff(true); return }
+    setDiffLoading(true)
+    try {
+      const res = await fetch(`/api/runs/${runId}/diff`)
+      if (res.ok) {
+        const data: DiffResponse = await res.json()
+        setDiffData(data)
+        setShowDiff(true)
+      }
+    } finally {
+      setDiffLoading(false)
+    }
+  }
+
+  // Render a simple inline diff with + / - line highlighting
+  const renderDiff = (diff: FileDiff) => {
+    if (diff.is_new) {
+      return (
+        <div style={{ padding: '0 16px' }}>
+          <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8, fontWeight: 600 }}>✨ New file added by Improver agent</div>
+          {diff.improved_content.split('\n').map((line, i) => (
+            <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--green)', background: 'rgba(34,197,94,.06)', padding: '0 4px' }}>
+              + {line}
+            </div>
+          ))}
+        </div>
+      )
+    }
+    if (diff.is_unchanged) {
+      return <div style={{ padding: '16px', fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic' }}>No changes — this file was not modified by the Improver agent.</div>
+    }
+
+    // Compute line-level diff
+    const origLines = diff.original_content.split('\n')
+    const impLines  = diff.improved_content.split('\n')
+    const maxLen    = Math.max(origLines.length, impLines.length)
+
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 200 }}>
+        <div style={{ borderRight: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 12px', background: 'rgba(239,68,68,.06)', borderBottom: '1px solid var(--border)' }}>Before (generated)</div>
+          {origLines.map((line, i) => {
+            const changed = line !== (impLines[i] ?? '')
+            return (
+              <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, padding: '0 8px', color: changed ? 'var(--red)' : 'var(--text-dim)', background: changed ? 'rgba(239,68,68,.06)' : 'transparent', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                <span style={{ color: 'var(--text-muted)', marginRight: 8, userSelect: 'none' }}>{i + 1}</span>{line}
+              </div>
+            )
+          })}
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 12px', background: 'rgba(34,197,94,.06)', borderBottom: '1px solid var(--border)' }}>After (improved)</div>
+          {impLines.map((line, i) => {
+            const changed = line !== (origLines[i] ?? '')
+            return (
+              <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, padding: '0 8px', color: changed ? 'var(--green)' : 'var(--text-dim)', background: changed ? 'rgba(34,197,94,.06)' : 'transparent', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                <span style={{ color: 'var(--text-muted)', marginRight: 8, userSelect: 'none' }}>{i + 1}</span>{line}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -156,21 +227,67 @@ export default function Result() {
         <main className="code-viewer">
           {active ? (
             <>
-              <div className="code-viewer-header">
-                <span className="code-viewer-path">{active.file_path}</span>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span className="badge badge-purple">{active.language}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {active.content.split('\n').length} lines
-                  </span>
+              <div className="code-viewer-header" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch', padding: '10px 16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="code-viewer-path">{active.file_path}</span>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <span className="badge badge-purple">{active.language}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {active.content.split('\n').length} lines
+                    </span>
+                  </div>
                 </div>
+                {/* Code / Diff toggle tabs */}
+                {run?.status === 'complete' && (
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      id="tab-code"
+                      onClick={() => setShowDiff(false)}
+                      style={{
+                        fontSize: 11, padding: '4px 12px', borderRadius: 6, border: 'none',
+                        cursor: 'pointer', fontWeight: 600,
+                        background: !showDiff ? 'var(--purple)' : 'var(--bg3)',
+                        color: !showDiff ? '#fff' : 'var(--text-muted)',
+                      }}
+                    >
+                      {'</>  Code'}
+                    </button>
+                    <button
+                      id="tab-diff"
+                      onClick={handleLoadDiff}
+                      style={{
+                        fontSize: 11, padding: '4px 12px', borderRadius: 6, border: 'none',
+                        cursor: 'pointer', fontWeight: 600,
+                        background: showDiff ? 'var(--purple)' : 'var(--bg3)',
+                        color: showDiff ? '#fff' : 'var(--text-muted)',
+                        display: 'flex', alignItems: 'center', gap: 4,
+                      }}
+                    >
+                      {diffLoading ? '⌛' : '± '} Diff View
+                    </button>
+                  </div>
+                )}
               </div>
-              <pre style={{ margin: 0, borderRadius: 0, border: 'none', minHeight: '100%' }}>
-                <code
-                  className={`language-${LANG_MAP[active.language] || 'plaintext'}`}
-                  dangerouslySetInnerHTML={{ __html: highlighted || active.content }}
-                />
-              </pre>
+
+              {showDiff && diffData ? (() => {
+                const fileDiff = diffData.diffs.find(d => d.file_path === active.file_path)
+                return fileDiff ? (
+                  <div style={{ overflow: 'auto', flex: 1 }}>
+                    {renderDiff(fileDiff)}
+                  </div>
+                ) : (
+                  <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
+                    No diff data available for this file (it may have been added during deployment).
+                  </div>
+                )
+              })() : (
+                <pre style={{ margin: 0, borderRadius: 0, border: 'none', minHeight: '100%' }}>
+                  <code
+                    className={`language-${LANG_MAP[active.language] || 'plaintext'}`}
+                    dangerouslySetInnerHTML={{ __html: highlighted || active.content }}
+                  />
+                </pre>
+              )}
             </>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
@@ -178,6 +295,7 @@ export default function Result() {
             </div>
           )}
         </main>
+
 
         {/* Right panel: metrics */}
         <aside className="result-panel">
@@ -241,9 +359,31 @@ export default function Result() {
           </div>
 
           {run.status === 'complete' && (
-            <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 24 }} onClick={handleDownload}>
-              ⬇ Download Project ZIP
-            </button>
+            <>
+              {/* Diff summary card */}
+              {diffData && (
+                <div className="card" style={{ marginTop: 20, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Improver Changes</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <span className="badge badge-yellow">{diffData.files_changed} modified</span>
+                    <span className="badge badge-green">{diffData.files_added} added</span>
+                    <span className="badge" style={{ background: 'var(--bg3)', color: 'var(--text-muted)' }}>{diffData.files_unchanged} unchanged</span>
+                  </div>
+                </div>
+              )}
+              <button
+                className="btn btn-ghost"
+                id="view-changes-btn"
+                style={{ width: '100%', justifyContent: 'center', marginTop: 12 }}
+                onClick={handleLoadDiff}
+                disabled={diffLoading}
+              >
+                {diffLoading ? '⌛ Loading diff...' : showDiff ? '📄 Hide Diff' : '± View Changes'}
+              </button>
+              <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={handleDownload}>
+                ⬇ Download Project ZIP
+              </button>
+            </>
           )}
         </aside>
       </div>

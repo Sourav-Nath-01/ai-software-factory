@@ -18,6 +18,28 @@ class RunStore:
         STORE_DIR.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
+    def cleanup_stale_runs(self) -> int:
+        """Mark any 'running' runs as 'failed' on server startup.
+
+        When the server crashes or gets OOM-killed, pipeline threads die
+        instantly without updating their run status. This ensures history
+        never shows ghost 'running' entries after a restart.
+
+        Returns the number of runs cleaned up.
+        """
+        cleaned = 0
+        for f in STORE_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("status") == "running":
+                    data["status"] = "failed"
+                    data["error"] = "Server restarted — run did not complete."
+                    f.write_text(json.dumps(data, indent=2))
+                    cleaned += 1
+            except Exception:
+                continue
+        return cleaned
+
     def create_run(self, prompt: str, model: str) -> str:
         run_id = str(uuid.uuid4())[:8]
         data = {
@@ -28,10 +50,17 @@ class RunStore:
             "created_at": datetime.now().isoformat(),
             "metrics": None,
             "files": [],
+            "initial_files": [],  # snapshot before Reviewer/Improver runs
             "error": None,
         }
         self._save(run_id, data)
         return run_id
+
+    def update_initial_codebase(self, run_id: str, files: list[dict]):
+        """Persist the initial generated codebase snapshot (before Improver runs)."""
+        run = self._load(run_id) or {}
+        run["initial_files"] = files
+        self._save(run_id, run)
 
     def update_complete(self, run_id: str, metrics: dict, files: list[dict]):
         run = self._load(run_id) or {}

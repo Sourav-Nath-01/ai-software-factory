@@ -63,3 +63,21 @@ class RunResult(BaseModel):
     metrics: Optional[RunMetrics] = None
     files: list[CodeFileResponse] = []
     error: Optional[str] = None
+
+
+class FileDiff(BaseModel):
+    """Before/after diff for a single file."""
+    file_path: str
+    original_content: str     # code before the Improver ran
+    improved_content: str     # code after the Improver ran
+    is_new: bool = False      # True if file was added during improvement
+    is_unchanged: bool = False
+
+
+class DiffResponse(BaseModel):
+    """Full diff report for a completed run."""
+    run_id: str
+    files_changed: int = 0
+    files_added: int = 0
+    files_unchanged: int = 0
+    diffs: list[FileDiff] = []

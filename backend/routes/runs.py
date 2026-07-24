@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from backend.models import RunRequest, RunResult, RunSummary, RunStatus, RunMetrics, CodeFileResponse
+from backend.models import RunRequest, RunResult, RunSummary, RunStatus, RunMetrics, CodeFileResponse, DiffResponse, FileDiff
 from backend.store.run_store import run_store
 from backend.ws import active_queues
 
@@ -37,6 +37,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
 
     def _run_pipeline():
         import os
+        import threading as _threading
         try:
             settings.max_review_iterations  = req.max_review_iterations
             settings.max_test_fix_iterations = req.max_test_fix_iterations
@@ -60,6 +61,15 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
                 model = "demo"
 
             from src.core.pipeline import Pipeline
+            from backend.ws import hitl_events, hitl_decisions, cancel_events
+
+            # Create HITL event for this run — pipeline will block on it after Planning
+            hitl_event = _threading.Event()
+            hitl_events[run_id] = hitl_event
+
+            # Create cancel event — set by POST /api/runs/{run_id}/cancel
+            cancel_event = _threading.Event()
+            cancel_events[run_id] = cancel_event
 
             # Capture real metrics from the pipeline's 'complete' event
             captured_metrics: dict = {}
@@ -75,6 +85,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
                 api_key=key,
                 demo=is_demo,
                 event_callback=on_event,
+                run_id=run_id,
+                cancel_event=cancel_event,
             )
             state = pipeline.run(req.prompt)
 
@@ -100,8 +112,16 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
             run_store.update_complete(run_id, metrics=captured_metrics, files=files)
 
         except Exception as e:
-            run_store.update_failed(run_id, str(e))
+            from src.core.pipeline import PipelineCancelledError
+            if isinstance(e, PipelineCancelledError):
+                run_store.update_failed(run_id, "Cancelled by user.")
+            else:
+                run_store.update_failed(run_id, str(e))
         finally:
+            # Clean up HITL and cancel state for this run
+            hitl_events.pop(run_id, None)
+            hitl_decisions.pop(run_id, None)
+            cancel_events.pop(run_id, None)
             event_queue.put(None)
 
 
@@ -198,3 +218,62 @@ async def get_stats():
         "success_rate": success_rate,
         "avg_files_generated": avg_files,
     }
+
+
+# ── Code Diff endpoint ────────────────────────────────────────
+
+@router.get("/runs/{run_id}/diff", response_model=DiffResponse)
+async def get_diff(run_id: str):
+    """
+    Return a file-level before/after diff between the initial generated
+    codebase (post-Coder) and the final improved codebase (post-Improver).
+
+    This powers the Diff Viewer in the Result page.
+    """
+    data = run_store.get_run(run_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if data["status"] not in ("complete",):
+        raise HTTPException(status_code=400, detail="Run is not complete yet")
+
+    final_files: list[dict]   = data.get("files", [])
+    initial_files: list[dict] = data.get("initial_files", [])
+
+    # Build lookup maps
+    initial_map = {f["file_path"]: f["content"] for f in initial_files}
+    final_map   = {f["file_path"]: f["content"] for f in final_files}
+    all_paths   = sorted(set(list(initial_map.keys()) + list(final_map.keys())))
+
+    diffs: list[FileDiff] = []
+    files_changed = 0
+    files_added   = 0
+    files_unchanged = 0
+
+    for path in all_paths:
+        orig = initial_map.get(path, "")
+        improved = final_map.get(path, "")
+        is_new = path not in initial_map
+        is_unchanged = (orig == improved) and not is_new
+
+        if is_unchanged:
+            files_unchanged += 1
+        elif is_new:
+            files_added += 1
+        else:
+            files_changed += 1
+
+        diffs.append(FileDiff(
+            file_path=path,
+            original_content=orig,
+            improved_content=improved,
+            is_new=is_new,
+            is_unchanged=is_unchanged,
+        ))
+
+    return DiffResponse(
+        run_id=run_id,
+        files_changed=files_changed,
+        files_added=files_added,
+        files_unchanged=files_unchanged,
+        diffs=diffs,
+    )
