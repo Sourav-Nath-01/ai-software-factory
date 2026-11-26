@@ -15,7 +15,7 @@ source .venv/bin/activate
 
 # Install/update Python deps
 echo "📦 Installing Python dependencies..."
-pip install -q -e "." 2>&1 | tail -5
+pip install -q -e ".[analysis]" 2>&1 | tail -5
 
 # ── Node deps ─────────────────────────────────────────────────
 if [ ! -d "frontend/node_modules" ]; then

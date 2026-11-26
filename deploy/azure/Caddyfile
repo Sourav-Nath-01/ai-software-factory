@@ -1,0 +1,6 @@
+# Caddy gets and renews a Let's Encrypt certificate for SITE_ADDRESS automatically,
+# and proxies WebSockets (/ws/...) without extra configuration.
+{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy app:7860
+}
