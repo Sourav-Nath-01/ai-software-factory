@@ -1,0 +1,37 @@
+# Production stack on one Azure VM: the app + Caddy (automatic HTTPS, WebSockets).
+# Started by cloud-init.yaml; SITE_ADDRESS comes from deploy/azure/.env (written there too).
+services:
+  app:
+    build: ../..
+    restart: unless-stopped
+    environment:
+      OUTPUT_DIR: /srv/ai-factory/output
+      MAX_CONCURRENT_RUNS: "2"   # a small VM: refuse extra runs with HTTP 429 instead of running out of memory
+      CORS_ORIGINS: https://${SITE_ADDRESS}
+    volumes:
+      # The sandbox starts sibling containers on the host's Docker daemon ...
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ... which resolves bind-mount paths on the HOST, so the output folder must
+      # have the same path inside this container as on the host.
+      - /srv/ai-factory/output:/srv/ai-factory/output
+    expose:
+      - "7860"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # TLS certificates survive restarts
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  caddy_config:

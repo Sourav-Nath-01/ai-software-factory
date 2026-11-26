@@ -1,6 +1,7 @@
 """FastAPI application — serves API + static frontend from a single process."""
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,9 +19,9 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure output dirs exist
-    Path("output/runs").mkdir(parents=True, exist_ok=True)
-    Path("output/memory").mkdir(parents=True, exist_ok=True)
+    # Ensure output dirs exist (OUTPUT_DIR, default ./output)
+    from src.core.config import settings
+    (settings.output_path / "runs").mkdir(parents=True, exist_ok=True)
     # Mark any 'running' runs from a previous crashed/killed server as failed
     from backend.store.run_store import run_store
     cleaned = run_store.cleanup_stale_runs()
@@ -39,13 +40,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS (allow Vite dev server in development) ──────────────
+# ── CORS ─────────────────────────────────────────────────────
+# The frontend is same-origin in production and proxied by Vite in dev, so
+# cross-origin access is only for explicitly listed origins. (A "*" wildcard
+# would let any website drive this API from a visitor's browser.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # ── Routers ──────────────────────────────────────────────────
@@ -59,15 +62,15 @@ app.include_router(ws_router)
 async def health():
     from src.core.sandbox import DOCKER_AVAILABLE
     from src.core.memory import _CHROMADB_AVAILABLE
-    from src.core.mcp_toolkit import BANDIT_AVAILABLE, FLAKE8_AVAILABLE, PIPIT_AVAILABLE
+    from src.core.static_analysis import BANDIT_AVAILABLE, FLAKE8_AVAILABLE, PIP_AUDIT_AVAILABLE
     return {
         "status": "ok",
         "docker_sandbox": DOCKER_AVAILABLE,
         "vector_memory": _CHROMADB_AVAILABLE,
-        "mcp_tools": {
+        "static_analysis": {
             "bandit":    BANDIT_AVAILABLE,
             "flake8":    FLAKE8_AVAILABLE,
-            "pip_audit": PIPIT_AVAILABLE,
+            "pip_audit": PIP_AUDIT_AVAILABLE,
         },
     }
 

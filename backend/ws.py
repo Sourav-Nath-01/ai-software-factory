@@ -42,22 +42,28 @@ async def websocket_run(ws: WebSocket, run_id: str):
         return
 
     event_queue = active_queues[run_id]
+    loop = asyncio.get_running_loop()
+    last_sent = loop.time()
 
     try:
         while True:
-            # Poll queue in a non-blocking way compatible with asyncio
+            # Non-blocking poll. (Blocking queue.get() in run_in_executor would
+            # hold a thread-pool thread per connected browser for the whole run,
+            # starving the pool once a dozen or so clients are connected.)
             try:
-                event = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: event_queue.get(timeout=60)
-                )
+                event = event_queue.get_nowait()
             except q_module.Empty:
-                await ws.send_text(json.dumps({"type": "ping"}))
+                if loop.time() - last_sent > 30:
+                    await ws.send_text(json.dumps({"type": "ping"}))  # keep proxies from idling us out
+                    last_sent = loop.time()
+                await asyncio.sleep(0.1)
                 continue
 
             if event is None:  # sentinel — pipeline finished
                 break
 
             await ws.send_text(json.dumps(event))
+            last_sent = loop.time()
 
     except WebSocketDisconnect:
         pass

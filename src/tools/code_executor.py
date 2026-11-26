@@ -1,5 +1,6 @@
 """Sandboxed code executor — runs commands in a subprocess with timeout."""
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,3 +72,12 @@ def run_command(
             stderr=f"Execution error: {e!s}",
             timed_out=False,
         )
+
+
+def pytest_counts(output: str) -> dict[str, int]:
+    """Passed / failed / error counts from pytest's summary line (the last occurrence wins)."""
+    counts = {"passed": 0, "failed": 0, "errors": 0}
+    names = {"passed": "passed", "failed": "failed", "error": "errors"}
+    for number, word in re.findall(r"(\d+) (passed|failed|error)s?\b", output or ""):
+        counts[names[word]] = int(number)
+    return counts

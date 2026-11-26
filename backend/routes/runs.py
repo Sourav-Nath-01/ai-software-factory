@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import zipfile
 from typing import Optional
 
@@ -11,8 +12,25 @@ from fastapi.responses import StreamingResponse
 from backend.models import RunRequest, RunResult, RunSummary, RunStatus, RunMetrics, CodeFileResponse, DiffResponse, FileDiff
 from backend.store.run_store import run_store
 from backend.ws import active_queues
+from src.core.config import settings
 
 router = APIRouter(prefix="/api", tags=["runs"])
+
+# Each run holds a thread, LLM calls and possibly a sandbox container. On a small
+# server, extra runs are refused with HTTP 429 instead of exhausting memory.
+_run_slots = threading.BoundedSemaphore(settings.max_concurrent_runs)
+
+
+def _safe_zip_name(path: str) -> str | None:
+    """Normalise an LLM-chosen file path for a ZIP entry, or None if unsafe.
+
+    Prevents "zip slip": entries like "../../.bashrc" or "/etc/x" would write
+    outside the folder when the user extracts the archive.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts or ":" in parts[0]:
+        return None
+    return "/".join(parts)
 
 
 # ── Start a run ──────────────────────────────────────────────
@@ -22,9 +40,16 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
     """Start a pipeline run and return its run_id immediately."""
     import queue as q_module
     import threading
-    from src.core.config import settings
+    from backend.models import Provider
 
-    is_demo = not req.api_key or len(req.api_key) < 10
+    # Demo mode only when asked for — a missing key must not silently produce mock output
+    is_demo = req.provider == Provider.DEMO
+    if not is_demo and not (req.api_key or "").strip():
+        raise HTTPException(status_code=400, detail=f"An API key is required for provider '{req.provider.value}'.")
+    # Taken before the run record exists, so a refused request never shows up as "running"
+    if not _run_slots.acquire(blocking=False):
+        raise HTTPException(status_code=429,
+                            detail="The server is busy with other runs. Please try again in a few minutes.")
 
     run_id = run_store.create_run(
         prompt=req.prompt,
@@ -36,26 +61,14 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
     active_queues[run_id] = event_queue
 
     def _run_pipeline():
-        import os
         import threading as _threading
         try:
-            settings.max_review_iterations  = req.max_review_iterations
-            settings.max_test_fix_iterations = req.max_test_fix_iterations
-
+            # The key and loop limits are passed to this run's Pipeline only —
+            # never written to os.environ or global settings, which every
+            # concurrent run shares.
             if not is_demo:
-                key      = (req.api_key or "").strip()
-                model    = req.model
-                provider = req.provider.value if req.provider else "openai"
-
-                # Set the correct env var so litellm picks it up automatically
-                if provider == "gemini":
-                    os.environ["GEMINI_API_KEY"] = key
-                    os.environ["GOOGLE_API_KEY"] = key
-                elif provider == "groq":
-                    os.environ["GROQ_API_KEY"] = key
-                else:
-                    os.environ["OPENAI_API_KEY"] = key
-                    settings.openai_api_key = key
+                key   = (req.api_key or "").strip()
+                model = req.model
             else:
                 key   = ""
                 model = "demo"
@@ -87,6 +100,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
                 event_callback=on_event,
                 run_id=run_id,
                 cancel_event=cancel_event,
+                max_review_iterations=req.max_review_iterations,
+                max_test_fix_iterations=req.max_test_fix_iterations,
             )
             state = pipeline.run(req.prompt)
 
@@ -123,6 +138,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
             hitl_decisions.pop(run_id, None)
             cancel_events.pop(run_id, None)
             event_queue.put(None)
+            _run_slots.release()
 
 
     thread = threading.Thread(target=_run_pipeline, daemon=True)
@@ -185,7 +201,9 @@ async def download_run(run_id: str):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in data.get("files", []):
-            zf.writestr(f["file_path"], f["content"])
+            name = _safe_zip_name(f["file_path"])
+            if name:
+                zf.writestr(name, f["content"])
 
     buf.seek(0)
     project_name = data["prompt"][:30].replace(" ", "_").lower()

@@ -5,8 +5,14 @@ export interface RunMetrics {
   test_fix_iterations: number;
   issues_found: number;
   issues_fixed: number;
+  static_issues_initial?: number | null;
+  static_issues_final?: number | null;
   tests_passed: boolean;
   duration_seconds: number;
+  llm_calls?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost_usd?: number;
 }
 
 export interface CodeFile {

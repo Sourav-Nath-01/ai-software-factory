@@ -15,6 +15,9 @@ build/
 
 # Output
 output/*/
+# Eval runs: keep results.jsonl / report.md, skip the generated projects
+evals/results/*/projects/
+evals/results/*/runs/
 
 # IDE
 .vscode/

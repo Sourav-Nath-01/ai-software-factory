@@ -45,10 +45,10 @@ BANNER = r"""
 TAGLINE = "Multiple specialized AI agents collaborating like a real engineering team."
 
 MODEL_CHOICES = {
-    "1": ("gemini/gemini-2.0-flash",      "Gemini 2.0 Flash  — FREE, recommended (Google AI Studio)"),
-    "2": ("gemini/gemini-2.0-flash-lite",  "Gemini 2.0 Flash Lite — FREE, fastest (Google AI Studio)"),
-    "3": ("groq/llama-3.1-8b-instant",     "Llama 3.1 8B (Groq) — FREE, near-instant (console.groq.com)"),
-    "4": ("groq/llama-3.3-70b-versatile",  "Llama 3.3 70B (Groq) — FREE, more capable (console.groq.com)"),
+    "1": ("gemini/gemini-2.5-flash",       "Gemini 2.5 Flash  — FREE, recommended (Google AI Studio)"),
+    "2": ("gemini/gemini-2.5-flash-lite",  "Gemini 2.5 Flash Lite — FREE, fastest (Google AI Studio)"),
+    "3": ("groq/openai/gpt-oss-120b",      "GPT-OSS 120B (Groq) — FREE, most capable (console.groq.com)"),
+    "4": ("groq/openai/gpt-oss-20b",       "GPT-OSS 20B (Groq) — FREE, fast (console.groq.com)"),
     "5": ("gpt-4o-mini",                   "GPT-4o Mini (OpenAI) — PAID, fast & cheap"),
     "6": ("gpt-4o",                        "GPT-4o (OpenAI)     — PAID, best quality"),
 }
@@ -163,7 +163,7 @@ def setup_model() -> str:
 
     for key, (model, desc) in MODEL_CHOICES.items():
         is_free = not model.startswith("gpt-")
-        marker = " [green]◀ recommended[/green]" if model == "gemini/gemini-2.0-flash" else ""
+        marker = " [green]◀ recommended[/green]" if model == "gemini/gemini-2.5-flash" else ""
         free_badge = " [green][FREE][/green]" if is_free else " [yellow][PAID][/yellow]"
         console.print(f"  [bold cyan]{key}[/bold cyan]  {desc}{free_badge}{marker}")
 
@@ -250,7 +250,7 @@ def run_interactive():
             if Confirm.ask("  [dim]Choose model / provider?[/dim]", default=True):
                 model_name = setup_model()
             else:
-                model_name = "gemini/gemini-2.0-flash"  # default free model
+                model_name = "gemini/gemini-2.5-flash"  # default free model
                 console.print(f"  [green]\u2713 Using default:[/green] [dim]{model_name}[/dim]")
         except (KeyboardInterrupt, EOFError):
             _graceful_exit()
@@ -362,11 +362,11 @@ def _run_direct(user_request: str):
     is_demo = True
 
     if settings.groq_api_key:
-        model = "groq/llama-3.3-70b-versatile"
+        model = "groq/openai/gpt-oss-120b"
         api_key = settings.groq_api_key
         is_demo = False
     elif settings.gemini_api_key or settings.google_api_key:
-        model = "gemini/gemini-2.0-flash"
+        model = "gemini/gemini-2.5-flash"
         api_key = settings.gemini_api_key or settings.google_api_key
         is_demo = False
     elif settings.openai_api_key and settings.openai_api_key != "sk-your-api-key-here":

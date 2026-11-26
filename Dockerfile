@@ -17,7 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python deps
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir -e ".[web]"
+# analysis: bandit/flake8/pip-audit for review grounding
+# pytest: generated tests run in-process here (Spaces has no Docker daemon)
+RUN pip install --no-cache-dir -e ".[web,analysis]" pytest
 
 # Copy source
 COPY src/ ./src/

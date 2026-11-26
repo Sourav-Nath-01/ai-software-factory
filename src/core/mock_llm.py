@@ -8,6 +8,8 @@ import json
 import time
 import random
 
+from src.core.config import settings
+
 
 # ── Pre-built realistic mock responses ────────────────────────
 
@@ -40,7 +42,7 @@ MOCK_PLAN = {
         {"method": "POST",   "path": "/auth/register", "description": "Register a new user"},
         {"method": "POST",   "path": "/auth/login",    "description": "Login and get JWT token"},
     ],
-    "additional_notes": "Uses SQLite for simplicity. JWT-based auth with bcrypt password hashing.",
+    "additional_notes": "Uses SQLite for simplicity. PBKDF2 password hashing and opaque bearer tokens (stdlib only).",
 }
 
 MOCK_CODE_FILES = [
@@ -178,6 +180,15 @@ async def list_todos():
     return [dict(row) for row in rows]
 
 
+@router.get("/search", response_model=list[TodoResponse])
+async def search_todos(q: str):
+    """Search todos by title."""
+    conn = get_connection()
+    rows = conn.execute(f"SELECT * FROM todos WHERE title LIKE '%{q}%'").fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 @router.post("/", response_model=TodoResponse, status_code=201)
 async def create_todo(todo: TodoCreate):
     """Create a new todo."""
@@ -206,11 +217,85 @@ async def delete_todo(todo_id: int):
         "language": "python",
     },
     {
+        "file_path": "app/routers/__init__.py",
+        "content": '"""API routers."""\n',
+        "language": "python",
+    },
+    {
+        "file_path": "app/routers/auth.py",
+        "content": '''"""User registration and login endpoints."""
+
+import hashlib
+import hmac
+import os
+import secrets
+import sqlite3
+
+from fastapi import APIRouter, HTTPException
+from app.models import UserCreate, Token
+from app.database import get_connection
+
+router = APIRouter()
+
+
+def _hash_password(password: str, salt: bytes) -> str:
+    """Hash a password with PBKDF2-HMAC-SHA256."""
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000).hex()
+
+
+@router.post("/register", status_code=201)
+async def register(user: UserCreate):
+    """Register a new user."""
+    salt = os.urandom(16)
+    stored = salt.hex() + "$" + _hash_password(user.password, salt)
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (user.username, stored),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    finally:
+        conn.close()
+    return {"username": user.username}
+
+
+@router.post("/login", response_model=Token)
+async def login(user: UserCreate):
+    """Login and get a bearer token."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT password_hash FROM users WHERE username = ?", (user.username,)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    salt_hex, expected = row["password_hash"].split("$", 1)
+    if not hmac.compare_digest(_hash_password(user.password, bytes.fromhex(salt_hex)), expected):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return Token(access_token=secrets.token_urlsafe(32))
+''',
+        "language": "python",
+    },
+    {
         "file_path": "requirements.txt",
-        "content": "fastapi==0.115.0\nuvicorn==0.30.0\npydantic==2.9.0\nbcrypt==4.2.0\npython-jose==3.3.0\n",
+        "content": "fastapi==0.115.0\nuvicorn==0.30.0\npydantic==2.9.0\n",
         "language": "text",
     },
 ]
+
+# The demo's one deliberate flaw: search_todos builds SQL with an f-string
+# (SQL injection, bandit B608). The Reviewer flags it, the Improver parameterises
+# the query, and the tools confirm the fix — so demo mode shows a verified fix
+# without an API key.
+_VULNERABLE_SEARCH = '''conn.execute(f"SELECT * FROM todos WHERE title LIKE '%{q}%'")'''
+_FIXED_SEARCH = '''conn.execute("SELECT * FROM todos WHERE title LIKE ?", (f"%{q}%",))'''
+_TODOS_ROUTER = next(f for f in MOCK_CODE_FILES if f["file_path"] == "app/routers/todos.py")
+assert _VULNERABLE_SEARCH in _TODOS_ROUTER["content"]
+MOCK_FIXED_FILES = [{**_TODOS_ROUTER,
+                     "content": _TODOS_ROUTER["content"].replace(_VULNERABLE_SEARCH, _FIXED_SEARCH)}]
 
 MOCK_REVIEW = {
     "comments": [
@@ -235,6 +320,23 @@ MOCK_REVIEW = {
     "summary": "Code is well-structured and follows FastAPI best practices. Minor improvements suggested for resource management.",
 }
 
+MOCK_REVIEW_FLAWED = {
+    "comments": [
+        {
+            "file_path": "app/routers/todos.py",
+            "severity": "critical",
+            "category": "security",
+            "description": "SQL injection: search_todos builds its query with an f-string, "
+                           "so the q parameter is executed as SQL (bandit B608).",
+            "suggestion": "Use a parameterised query: conn.execute(\"... WHERE title LIKE ?\", (f\"%{q}%\",)).",
+            "line_number": 22,
+        },
+        MOCK_REVIEW["comments"][0],
+    ],
+    "overall_quality": "needs_improvement",
+    "summary": "One critical SQL injection in the search endpoint; otherwise well structured.",
+}
+
 MOCK_TEST_FILES = [
     {
         "file_path": "tests/test_todos.py",
@@ -244,28 +346,41 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 
-client = TestClient(app)
+
+@pytest.fixture
+def client():
+    """Test client that runs startup events (creates the tables)."""
+    with TestClient(app) as c:
+        yield c
 
 
-def test_health_check():
+def test_health_check(client):
     """Test health check endpoint."""
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
 
 
-def test_create_todo():
+def test_create_todo(client):
     """Test creating a new todo."""
     response = client.post("/todos/", json={"title": "Test todo"})
     assert response.status_code == 201
     assert response.json()["title"] == "Test todo"
 
 
-def test_list_todos():
+def test_list_todos(client):
     """Test listing all todos."""
     response = client.get("/todos/")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_search_todos(client):
+    """Test searching todos by title."""
+    client.post("/todos/", json={"title": "Buy milk"})
+    response = client.get("/todos/search", params={"q": "milk"})
+    assert response.status_code == 200
+    assert any("milk" in todo["title"] for todo in response.json())
 ''',
         "language": "python",
     },
@@ -306,9 +421,9 @@ class MockLLM:
     cause the response sequence to fall out of sync.
     """
 
-    def call(self, system: str = "", **kwargs) -> str:
+    def call(self, system: str = "", user: str = "", **kwargs) -> str:
         """Simulate an LLM call with a short delay, returning stage-appropriate JSON."""
-        time.sleep(random.uniform(0.8, 2.0))
+        time.sleep(random.uniform(0.8, 2.0) * settings.demo_delay_scale)
         s = system.lower()
 
         # Use first-sentence phrases from each backstory — must be UNIQUE per agent
@@ -327,10 +442,12 @@ class MockLLM:
             return json.dumps(MOCK_DEPLOYMENT)
 
         if "meticulous senior code reviewer" in s:
-            return json.dumps(MOCK_REVIEW)
+            # Judge the code actually in the prompt: keep flagging the injection until it is gone
+            flawed = "LIKE '%{q}%'" in user or "B608" in user
+            return json.dumps(MOCK_REVIEW_FLAWED if flawed else MOCK_REVIEW)
 
         if "code improvement specialist" in s or "fix every issue" in s:
-            return json.dumps({"files": MOCK_CODE_FILES})
+            return json.dumps({"files": MOCK_FIXED_FILES})  # only the changed file
 
         if "elite software engineer" in s or "production-ready" in s:
             return json.dumps({"files": MOCK_CODE_FILES})

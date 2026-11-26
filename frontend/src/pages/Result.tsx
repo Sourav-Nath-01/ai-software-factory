@@ -319,8 +319,8 @@ export default function Result() {
                   <div className="metric-label">Issues Found</div>
                 </div>
                 <div className="metric-card">
-                  <span className="metric-value">{m.issues_fixed}</span>
-                  <div className="metric-label">Issues Fixed</div>
+                  <span className="metric-value">{m.static_issues_initial == null ? '—' : m.issues_fixed}</span>
+                  <div className="metric-label">Verified Fixes</div>
                 </div>
                 <div className="metric-card">
                   <span className="metric-value">{m.review_iterations}</span>

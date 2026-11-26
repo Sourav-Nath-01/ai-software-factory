@@ -1,0 +1,19 @@
+#cloud-config
+# First-boot setup for the Azure VM (provision.sh fills in __REPO_URL__, __BRANCH__, __FQDN__).
+# Progress: ssh in and run  sudo tail -f /var/log/cloud-init-output.log
+package_update: true
+packages:
+  - git
+  - ca-certificates
+  - curl
+
+runcmd:
+  # 2 GB swap: a 1 GiB VM needs it to build the frontend and run a sandbox container
+  - fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  # Docker Engine + compose plugin
+  - curl -fsSL https://get.docker.com | sh
+  - git clone --depth 1 --branch __BRANCH__ __REPO_URL__ /opt/ai-factory
+  - mkdir -p /srv/ai-factory/output
+  - echo "SITE_ADDRESS=__FQDN__" > /opt/ai-factory/deploy/azure/.env
+  - docker compose -f /opt/ai-factory/deploy/azure/compose.yaml up -d --build

@@ -12,40 +12,36 @@ Architecture:
     TokenBucket uses a refilling token bucket algorithm:
     - Each provider has a max capacity (tokens per minute)
     - Tokens refill at a constant rate proportional to the RPM limit
-    - Before each LLM call, we "consume" an estimated token count
+    - Before each LLM call, we reserve the estimated prompt tokens PLUS the
+      output budget (providers count both against TPM)
     - If the bucket doesn't have enough, we sleep until it refills
+    - After the call, reconcile() refunds what the response didn't use
 
 Usage:
-    bucket = get_rate_limiter("gemini/gemini-2.0-flash")
-    wait = bucket.consume(estimated_tokens=2000)
-    # if wait > 0, we already slept — just proceed with the LLM call
+    bucket = get_rate_limiter("groq/openai/gpt-oss-120b")
+    wait = bucket.consume(prompt_text, extra_tokens=max_tokens)
+    ...call the LLM...
+    bucket.reconcile(reserved=..., actual=usage.total_tokens)
 """
 from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from typing import Callable
 
 
 # ── Provider-specific limits ───────────────────────────────────
-# Based on publicly documented free-tier limits
+# Free-tier limits change often; Groq reports yours in the
+# x-ratelimit-limit-tokens response header.
 
 PROVIDER_LIMITS: dict[str, dict] = {
-    "gemini_flash": {
-        "tpm": 1_000_000,   # gemini-2.0-flash free tier
-        "rpm": 15,          # free tier is 15 requests/min
-    },
-    "gemini_pro": {
-        "tpm": 1_000_000,
-        "rpm": 15,
-    },
-    "groq_small": {
-        "tpm": 30_000,      # llama-3.1-8b-instant
+    "groq": {
+        "tpm": 8_000,       # openai/gpt-oss-120b, openai/gpt-oss-20b free tier (plus 200K tokens/day per model)
         "rpm": 30,
     },
-    "groq_large": {
-        "tpm": 12_000,      # llama-3.3-70b-versatile
-        "rpm": 30,
+    "gemini": {
+        "tpm": 250_000,     # gemini-2.5-flash free tier
+        "rpm": 10,
     },
     "openai": {
         "tpm": 200_000,     # gpt-4o-mini tier-1
@@ -59,22 +55,22 @@ PROVIDER_LIMITS: dict[str, dict] = {
 
 
 def _resolve_limits(model: str) -> dict:
-    """Map a model string to its provider limits."""
+    """Map a model string to its provider limits.
+
+    The provider prefix decides, not the model name: "groq/openai/gpt-oss-120b"
+    contains "gpt" but is served under Groq's limits.
+    """
     m = model.lower()
-    if "gemini-2.0-flash" in m or "gemini-flash" in m:
-        return PROVIDER_LIMITS["gemini_flash"]
-    if "gemini" in m:
-        return PROVIDER_LIMITS["gemini_pro"]
-    if "llama-3.3-70b" in m:
-        return PROVIDER_LIMITS["groq_large"]
-    if "groq/" in m or "llama" in m:
-        return PROVIDER_LIMITS["groq_small"]
-    if "gpt" in m or "openai/" in m:
+    if m.startswith("groq/"):
+        return PROVIDER_LIMITS["groq"]
+    if m.startswith("gemini/") or "gemini" in m:
+        return PROVIDER_LIMITS["gemini"]
+    if m.startswith("openai/") or "/" not in m:
         return PROVIDER_LIMITS["openai"]
     return PROVIDER_LIMITS["default"]
 
 
-def _estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str) -> int:
     """
     Fast, dependency-free token count estimate.
     Approximation: 1 token ≈ 4 characters (works well for English/code).
@@ -129,14 +125,26 @@ class TokenBucket:
             return max(0.0, wait)
         return 0.0
 
-    def consume(self, text: str) -> float:
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    def consume(self, text: str, sleep: Callable[[float], None] = time.sleep,
+                extra_tokens: int = 0) -> float:
         """
-        Estimate tokens for `text`, then block until the bucket can serve them.
+        Estimate tokens for `text` (+ `extra_tokens`), then block until the bucket can serve them.
+
+        Args:
+            sleep: how to wait — callers pass an interruptible sleep so a
+                   cancelled run doesn't sit out a long rate-limit wait.
+            extra_tokens: output budget to reserve (providers count output against TPM too).
 
         Returns:
             float: total seconds slept (0 if no wait was needed)
         """
-        needed = _estimate_tokens(text)
+        # A request bigger than the whole bucket could never be served and would
+        # wait forever — cap it so it waits for a full bucket at most.
+        needed = min(estimate_tokens(text) + extra_tokens, self._capacity)
         total_wait = 0.0
 
         while True:
@@ -157,10 +165,16 @@ class TokenBucket:
                     deficit = needed - self._tokens
                     rpm_wait = deficit / self._refill_rate
 
-            # Only sleep if the wait is meaningful (> 0.2s)
-            if rpm_wait > 0.2:
-                time.sleep(rpm_wait)
-                total_wait += rpm_wait
+            # Sleep outside the lock; a minimum of 0.2s avoids busy-spinning on tiny deficits
+            wait = max(rpm_wait, 0.2)
+            sleep(wait)
+            total_wait += wait
+
+    def reconcile(self, reserved: int, actual: int):
+        """After a call, return reserved-but-unused tokens (or charge an overrun)."""
+        with self._lock:
+            self._refill()
+            self._tokens = min(self._capacity, self._tokens + (reserved - actual))
 
 
 # ── Registry ──────────────────────────────────────────────────

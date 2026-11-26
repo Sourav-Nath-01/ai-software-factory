@@ -26,9 +26,9 @@ const PROVIDER_MODELS: ModelOption[] = [
   },
   {
     provider: 'gemini',
-    model: 'gemini/gemini-2.0-flash',
-    label: 'Gemini 2.0 Flash',
-    desc: 'Google\'s latest free model — fast & capable.',
+    model: 'gemini/gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash',
+    desc: 'Google\'s free tier — capable, large token budget.',
     badge: 'FREE · Recommended',
     badgeColor: 'badge-green',
     keyPlaceholder: 'AIza... (from aistudio.google.com)',
@@ -36,8 +36,8 @@ const PROVIDER_MODELS: ModelOption[] = [
   },
   {
     provider: 'gemini',
-    model: 'gemini/gemini-2.0-flash-lite',
-    label: 'Gemini 2.0 Flash Lite',
+    model: 'gemini/gemini-2.5-flash-lite',
+    label: 'Gemini 2.5 Flash Lite',
     desc: 'Lightest Gemini model — fastest responses.',
     badge: 'FREE · Fastest',
     badgeColor: 'badge-green',
@@ -46,20 +46,20 @@ const PROVIDER_MODELS: ModelOption[] = [
   },
   {
     provider: 'groq',
-    model: 'groq/llama-3.1-8b-instant',
-    label: 'Llama 3.1 8B (Groq)',
-    desc: 'Best for free tier — 30K TPM limit, near-instant replies.',
-    badge: 'FREE · Recommended',
+    model: 'groq/openai/gpt-oss-120b',
+    label: 'GPT-OSS 120B (Groq)',
+    desc: 'Strong open-weight reasoning model. 8K TPM free — runs take a few minutes.',
+    badge: 'FREE · Most capable',
     badgeColor: 'badge-green',
     keyPlaceholder: 'gsk_... (from console.groq.com)',
     keyLink: 'https://console.groq.com/keys',
   },
   {
     provider: 'groq',
-    model: 'groq/llama-3.3-70b-versatile',
-    label: 'Llama 3.3 70B (Groq)',
-    desc: 'More capable but 12K TPM — may hit rate limits on large code.',
-    badge: 'FREE · High TPM',
+    model: 'groq/openai/gpt-oss-20b',
+    label: 'GPT-OSS 20B (Groq)',
+    desc: 'Smaller and faster, with its own free daily quota. 8K TPM free.',
+    badge: 'FREE · Fast',
     badgeColor: 'badge-yellow',
     keyPlaceholder: 'gsk_... (from console.groq.com)',
     keyLink: 'https://console.groq.com/keys',
@@ -223,6 +223,11 @@ export default function Build() {
           max_test_fix_iterations: maxTest,
         }),
       })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        const detail = typeof body.detail === 'string' ? body.detail : `Request failed (${res.status})`
+        throw new Error(detail)
+      }
       const { run_id } = await res.json()
       setRunId(run_id)
       setHitlRunId(run_id)
