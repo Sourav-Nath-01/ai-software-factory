@@ -495,11 +495,45 @@ class TestAPI:
         r = client.post("/api/run", json={
             "prompt": "Build a simple calculator REST API with FastAPI",
             "provider": "demo", "model": "demo",
-            "max_review_iterations": 1, "max_test_fix_iterations": 1,
+            "max_review_iterations": 1, "max_test_fix_iterations": 1, "require_approval": False,
         })
         assert r.status_code == 200
         data = r.json()
         assert "run_id" in data and data["status"] == "running"
+
+    def _wait_for_review(self, client, run_id: str, timeout: float = 30):
+        for _ in range(int(timeout * 10)):
+            if client.get(f"/api/runs/{run_id}/hitl_status").json()["waiting_for_approval"]:
+                return
+            time.sleep(0.1)
+        raise AssertionError("the run never paused for review")
+
+    def test_review_can_revise_the_plan_then_approve(self, client):
+        """Reject with feedback -> the Planner revises -> approve -> the run completes."""
+        r = client.post("/api/run", json={"prompt": "Build a simple todo REST API", "provider": "demo", "model": "demo",
+                                          "max_review_iterations": 1, "max_test_fix_iterations": 1})
+        run_id = r.json()["run_id"]
+        self._wait_for_review(client, run_id)
+        empty = client.post(f"/api/runs/{run_id}/approve", json={"action": "revise", "feedback": "  "})
+        assert empty.status_code == 400
+        revise = client.post(f"/api/runs/{run_id}/approve",
+                             json={"action": "revise", "feedback": "Use PostgreSQL instead of SQLite"})
+        assert revise.status_code == 200
+        self._wait_for_review(client, run_id)  # the revised plan is up for review
+        assert client.post(f"/api/runs/{run_id}/approve", json={"action": "approve"}).status_code == 200
+        run = self._wait_complete(client, run_id)
+        assert run["status"] == "complete" and run["metrics"]["plan_revisions"] == 1
+
+    def test_review_decisions_are_only_accepted_while_waiting(self, client):
+        import threading
+        from backend.ws import hitl_events
+        assert client.post("/api/runs/no-such-run/approve", json={"action": "approve"}).status_code == 404
+        hitl_events["paused-elsewhere"] = threading.Event()  # exists, but not waiting for a review
+        try:
+            r = client.post("/api/runs/paused-elsewhere/approve", json={"action": "approve"})
+            assert r.status_code == 409
+        finally:
+            hitl_events.pop("paused-elsewhere", None)
 
     def _wait_complete(self, client, run_id: str, timeout: int = 120):
         """Poll until the run reaches a terminal state or timeout expires.
@@ -519,7 +553,7 @@ class TestAPI:
         r = client.post("/api/run", json={
             "prompt": "Build a hello world REST API",
             "provider": "demo", "model": "demo",
-            "max_review_iterations": 1, "max_test_fix_iterations": 1,
+            "max_review_iterations": 1, "max_test_fix_iterations": 1, "require_approval": False,
         })
         run_id = r.json()["run_id"]
         run = self._wait_complete(client, run_id)
@@ -532,7 +566,7 @@ class TestAPI:
         r = client.post("/api/run", json={
             "prompt": "Build a simple todo list API",
             "provider": "demo", "model": "demo",
-            "max_review_iterations": 1, "max_test_fix_iterations": 1,
+            "max_review_iterations": 1, "max_test_fix_iterations": 1, "require_approval": False,
         })
         run_id = r.json()["run_id"]
         self._wait_complete(client, run_id)
@@ -544,9 +578,86 @@ class TestAPI:
         r = client.post("/api/run", json={
             "prompt": "Build a REST API for managing tasks",
             "provider": "demo", "model": "demo",
-            "max_review_iterations": 1, "max_test_fix_iterations": 1,
+            "max_review_iterations": 1, "max_test_fix_iterations": 1, "require_approval": False,
         })
         self._wait_complete(client, r.json()["run_id"])
         stats = client.get("/api/stats").json()
         assert stats["total_runs"] >= 1
         assert stats["success_rate"] > 0
+
+
+
+# ─── Architecture review: approve / revise / abort ────────────
+
+class TestPlanReview:
+    RUN_ID = "review-test"
+
+    @pytest.fixture
+    def pipeline(self):
+        import threading
+        from backend.ws import hitl_events
+        from src.core.mock_llm import MOCK_PLAN
+        from src.core.models import PipelineState
+        from src.core.pipeline import Pipeline
+        p = Pipeline(demo=True, run_id=self.RUN_ID)
+        p.state = PipelineState(user_request="Build a todo API")
+        p.state.plan = Pipeline._plan_from_data(MOCK_PLAN)
+        p.events = []
+        p.event_callback = p.events.append
+        hitl_events[self.RUN_ID] = threading.Event()
+        yield p
+        hitl_events.pop(self.RUN_ID, None)
+
+    def _review(self, pipeline, decisions):
+        """Run the checkpoint in a thread and answer each review like the API would."""
+        import threading
+        from backend.ws import hitl_decisions, hitl_events, hitl_waiting
+        errors = []
+
+        def target():
+            try:
+                pipeline._run_hitl_checkpoint()
+            except Exception as e:
+                errors.append(e)
+        thread = threading.Thread(target=target)
+        thread.start()
+        for decision in decisions:
+            for _ in range(500):
+                if self.RUN_ID in hitl_waiting and not hitl_events[self.RUN_ID].is_set():
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("the pipeline never paused for review")
+            hitl_decisions[self.RUN_ID] = decision
+            hitl_events[self.RUN_ID].set()
+        thread.join(10)
+        assert not thread.is_alive()
+        return errors
+
+    def test_revise_then_approve_applies_the_feedback(self, pipeline):
+        feedback = "Use PostgreSQL instead of SQLite"
+        errors = self._review(pipeline, [{"action": "revise", "feedback": feedback}, {"action": "approve"}])
+        assert not errors
+        assert pipeline._plan_revisions == 1
+        assert feedback in pipeline.state.plan.description           # the Planner applied it (mock)
+        assert feedback in pipeline.state.plan.additional_notes      # and the Coder will see it verbatim
+        checkpoints = [e for e in pipeline.events if e["type"] == "hitl_checkpoint"]
+        assert [(c["revision"], c["revisions_left"]) for c in checkpoints] == [(0, 3), (1, 2)]
+        types = [e["type"] for e in pipeline.events]
+        assert "hitl_revising" in types and types[-1] == "hitl_approved"
+
+    def test_abort_stops_the_run(self, pipeline):
+        errors = self._review(pipeline, [{"action": "abort", "reason": "Wrong stack"}])
+        assert len(errors) == 1 and "aborted by user: Wrong stack" in str(errors[0])
+
+    def test_legacy_approved_flag_still_works(self, pipeline):
+        assert not self._review(pipeline, [{"approved": True}])
+        errors = self._review(pipeline, [{"approved": False, "reason": "no"}])
+        assert errors and "aborted by user" in str(errors[0])
+
+    def test_revisions_are_capped(self, pipeline):
+        from src.core.pipeline import MAX_PLAN_REVISIONS
+        decisions = [{"action": "revise", "feedback": f"change {i}"} for i in range(MAX_PLAN_REVISIONS + 1)]
+        errors = self._review(pipeline, decisions)
+        assert pipeline._plan_revisions == MAX_PLAN_REVISIONS
+        assert errors and f"revised {MAX_PLAN_REVISIONS} times" in str(errors[0])

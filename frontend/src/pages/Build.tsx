@@ -116,6 +116,12 @@ export default function Build() {
   const [hitlPlan,   setHitlPlan]   = useState<HITLPlan | null>(null)
   const [hitlRunId,  setHitlRunId]  = useState<string | null>(null)
   const [hitlLoading, setHitlLoading] = useState(false)
+  const [hitlFeedback, setHitlFeedback] = useState('')
+  const [hitlRevising, setHitlRevising] = useState(false)       // the Planner is rewriting the plan
+  const [hitlRevision, setHitlRevision] = useState(0)
+  const [hitlRevisionsLeft, setHitlRevisionsLeft] = useState(0)
+  const [hitlError, setHitlError] = useState<string | null>(null)
+  const [requireApproval, setRequireApproval] = useState(true)
 
   // Stop/cancel state
   const [stopping, setStopping] = useState(false)
@@ -170,17 +176,27 @@ export default function Build() {
     if (ev.type === 'ping') return
     // HITL checkpoint — show approval modal
     if (ev.type === 'hitl_checkpoint') {
-      const plan = ev.plan
-      if (plan) {
-        setHitlPlan(plan)
-      }
-      addLog('⏸️ Pipeline paused — waiting for your architecture approval')
+      if (ev.plan) setHitlPlan(ev.plan)
+      setHitlRevision(ev.revision ?? 0)
+      setHitlRevisionsLeft(ev.revisions_left ?? 0)
+      setHitlFeedback('')
+      setHitlRevising(false)
+      setHitlLoading(false)
+      addLog(ev.revision ? `⏸️ Revised plan ready (revision ${ev.revision}) — waiting for your review`
+                         : '⏸️ Pipeline paused — waiting for your architecture review')
+      return
+    }
+    // The Planner is rewriting the plan from the user's feedback
+    if (ev.type === 'hitl_revising') {
+      setHitlRevising(true)
+      addLog(`📝 Revising the plan: ${ev.feedback ?? ''}`)
       return
     }
     // HITL approved — dismiss modal and continue
     if (ev.type === 'hitl_approved') {
       setHitlPlan(null)
       setHitlLoading(false)
+      setHitlRevising(false)
       addLog('✅ Architecture approved — continuing to code generation')
       return
     }
@@ -221,6 +237,7 @@ export default function Build() {
           model: selected.model,
           max_review_iterations: maxRev,
           max_test_fix_iterations: maxTest,
+          require_approval: requireApproval,
         }),
       })
       if (!res.ok) {
@@ -256,22 +273,33 @@ export default function Build() {
   useEffect(() => () => { wsRef.current?.close() }, [])
 
   // HITL handlers
-  const handleHITLDecision = async (approved: boolean) => {
+  const handleHITLDecision = async (action: 'approve' | 'revise' | 'abort') => {
     if (!hitlRunId) return
     setHitlLoading(true)
+    setHitlError(null)
     try {
-      await fetch(`/api/runs/${hitlRunId}/approve`, {
+      const res = await fetch(`/api/runs/${hitlRunId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approved, reason: approved ? '' : 'User rejected the architecture plan.' }),
+        body: JSON.stringify({
+          action,
+          feedback: hitlFeedback,
+          reason: action === 'abort' ? 'User rejected the architecture plan.' : '',
+        }),
       })
-      if (!approved) {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${res.status})`)
+      }
+      if (action === 'abort') {
         setHitlPlan(null)
         setError('You rejected the architecture. Pipeline stopped.')
         setPhase('done')
       }
-      // If approved, the WebSocket will receive hitl_approved event and close the modal
+      if (action === 'revise') setHitlRevising(true)
+      // approve / revise: WebSocket events (hitl_approved, the next hitl_checkpoint) update the modal
     } catch (e) {
+      setHitlError(e instanceof Error ? e.message : 'Request failed')
       setHitlLoading(false)
     }
   }
@@ -292,8 +320,10 @@ export default function Build() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
           <span style={{ fontSize: 28 }}>👤</span>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 20 }}>Architecture Review</div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Human-in-the-Loop Checkpoint — approve before code generation starts</div>
+            <div style={{ fontWeight: 800, fontSize: 20 }}>
+              Architecture Review{hitlRevision > 0 ? ` · revision ${hitlRevision}` : ''}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Approve the plan, or describe changes and the Planner will revise it</div>
           </div>
         </div>
 
@@ -346,24 +376,58 @@ export default function Build() {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
+        <div style={{ marginTop: 8 }}>
+          <label className="form-label" htmlFor="hitl-feedback">
+            Want changes? {hitlRevisionsLeft > 0
+              ? `Describe them and the Planner will revise the plan (${hitlRevisionsLeft} revision${hitlRevisionsLeft === 1 ? '' : 's'} left).`
+              : 'No revisions left — approve this plan or cancel the run.'}
+          </label>
+          <textarea
+            id="hitl-feedback"
+            rows={3}
+            maxLength={2000}
+            placeholder="e.g. Use PostgreSQL instead of SQLite, and add an endpoint to export todos as CSV"
+            value={hitlFeedback}
+            onChange={e => setHitlFeedback(e.target.value)}
+            disabled={hitlLoading || hitlRevising || hitlRevisionsLeft === 0}
+            style={{ width: '100%', resize: 'vertical', fontSize: 13 }}
+          />
+        </div>
+
+        {hitlRevising && (
+          <div style={{ marginTop: 12, fontSize: 13, color: 'var(--text-muted)' }}>⏳ The Planner is revising the plan with your feedback…</div>
+        )}
+        {hitlError && (
+          <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{hitlError}</div>
+        )}
+
+        <div style={{ display: 'flex', gap: 12, marginTop: 20, flexWrap: 'wrap' }}>
           <button
             id="hitl-approve-btn"
             className="btn btn-primary"
-            style={{ flex: 1, justifyContent: 'center', fontSize: 15, padding: '13px' }}
-            disabled={hitlLoading}
-            onClick={() => handleHITLDecision(true)}
+            style={{ flex: 1, justifyContent: 'center', fontSize: 15, padding: '13px', minWidth: 200 }}
+            disabled={hitlLoading || hitlRevising}
+            onClick={() => handleHITLDecision('approve')}
           >
-            {hitlLoading ? '⌛ Processing...' : '✅ Approve — Start Coding'}
+            {hitlLoading && !hitlRevising ? '⌛ Processing...' : '✅ Approve — Start Coding'}
+          </button>
+          <button
+            id="hitl-revise-btn"
+            className="btn btn-ghost"
+            style={{ padding: '13px 20px' }}
+            disabled={hitlLoading || hitlRevising || hitlRevisionsLeft === 0 || !hitlFeedback.trim()}
+            onClick={() => handleHITLDecision('revise')}
+          >
+            ✎ Revise plan
           </button>
           <button
             id="hitl-reject-btn"
             className="btn btn-ghost"
             style={{ padding: '13px 20px', color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }}
-            disabled={hitlLoading}
-            onClick={() => handleHITLDecision(false)}
+            disabled={hitlLoading || hitlRevising}
+            onClick={() => handleHITLDecision('abort')}
           >
-            ✗ Reject
+            ✗ Cancel run
           </button>
         </div>
       </div>
@@ -474,6 +538,10 @@ export default function Build() {
                 <label className="form-label">Max Test-Fix Cycles: {maxTest}</label>
                 <input type="range" min={1} max={5} value={maxTest} onChange={e => setMaxTest(+e.target.value)} style={{ padding: 0, height: 6 }} />
               </div>
+              <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={requireApproval} onChange={e => setRequireApproval(e.target.checked)} />
+                Pause after planning so I can approve or revise the architecture
+              </label>
             </div>
           </details>
 

@@ -31,3 +31,23 @@ You MUST produce a JSON object (and ONLY a JSON object, no extra text) with thes
 Think step by step. Be specific about file paths and module boundaries.
 Output ONLY valid JSON. No markdown, no code fences, no explanations.
 """
+
+PLAN_REVISION_TASK = """Revise this architecture plan according to the user's feedback.
+
+## Original Request
+{user_request}
+
+## Current Plan
+{plan}
+
+## User Feedback
+{feedback}
+
+## Rules
+1. Apply every change the feedback asks for; keep everything it doesn't mention
+2. Keep the plan consistent: when a technology changes, update the files, modules and endpoints that depend on it
+3. Output ONLY a JSON object with the same keys as the current plan:
+   project_name, description, tech_stack, file_structure, modules, endpoints, additional_notes
+
+Output ONLY valid JSON. No markdown, no code fences, no explanations.
+"""
