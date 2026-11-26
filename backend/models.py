@@ -16,7 +16,7 @@ class RunRequest(BaseModel):
     prompt: str = Field(..., min_length=10, description="What to build")
     api_key: Optional[str] = Field(None, description="API key for the selected provider")
     provider: Provider = Field(Provider.DEMO, description="LLM provider")
-    model: str = Field("gemini/gemini-1.5-flash", description="Full LiteLLM model string")
+    model: str = Field("gemini/gemini-2.5-flash", description="Full LiteLLM model string")
     max_review_iterations: int = Field(2, ge=1, le=5)
     max_test_fix_iterations: int = Field(2, ge=1, le=5)
 
@@ -34,9 +34,15 @@ class RunMetrics(BaseModel):
     review_iterations: int = 0
     test_fix_iterations: int = 0
     issues_found: int = 0
-    issues_fixed: int = 0
+    issues_fixed: int = 0                         # verified by re-running bandit + flake8
+    static_issues_initial: Optional[int] = None   # None = static analysis didn't run
+    static_issues_final: Optional[int] = None
     tests_passed: bool = False
     duration_seconds: float = 0.0
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0                         # list-price equivalent
 
 
 class CodeFileResponse(BaseModel):
