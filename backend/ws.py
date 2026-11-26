@@ -18,8 +18,13 @@ active_queues: Dict[str, q_module.Queue] = {}
 # run_id -> threading.Event  (set when user approves/rejects)
 hitl_events: Dict[str, threading.Event] = {}
 
-# run_id -> {"approved": bool, "reason": str}
+# run_id -> {"action": "approve" | "revise" | "abort", "feedback": str, "reason": str}
 hitl_decisions: Dict[str, dict] = {}
+
+# Runs whose pipeline is blocked on a review *right now*. A decision is only
+# accepted then — never while the plan is being revised, or an "approve" sent
+# during the revision would approve a plan nobody has seen yet.
+hitl_waiting: set[str] = set()
 
 # ── Pipeline cancellation ───────────────────────────────
 # run_id -> threading.Event  (set when user clicks Stop)

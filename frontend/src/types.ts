@@ -13,6 +13,7 @@ export interface RunMetrics {
   prompt_tokens?: number;
   completion_tokens?: number;
   cost_usd?: number;
+  plan_revisions?: number;
 }
 
 export interface CodeFile {
@@ -61,6 +62,7 @@ export type PipelineEventType =
   | 'ping'
   | 'hitl_checkpoint'
   | 'hitl_approved'
+  | 'hitl_revising'
   | 'cancelled';
 
 export interface PipelineEvent {
@@ -74,6 +76,9 @@ export interface PipelineEvent {
   metrics?: RunMetrics;
   prompt?: string;
   plan?: HITLPlan;  // present on hitl_checkpoint events
+  revision?: number;        // hitl_checkpoint / hitl_revising: 0 = the first plan
+  revisions_left?: number;  // hitl_checkpoint: how many more "revise" rounds are allowed
+  feedback?: string;        // hitl_revising: the user's requested changes
 }
 
 export interface StageState {

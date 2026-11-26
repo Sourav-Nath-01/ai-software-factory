@@ -32,6 +32,16 @@ Settings can be overridden: `LOCATION=eastus VM_SIZE=Standard_B1ms BRANCH=main b
 | `RESOURCE_GROUP` | `ai-factory-rg` | Everything lives here, so deleting it removes all costs |
 | `BRANCH` | `main` | Branch the VM clones |
 
+## Troubleshooting
+
+| Error | Fix |
+|---|---|
+| `RequestDisallowedByAzure` … "best available regions" | Student subscriptions allow only a few regions. The script lists them when it can; otherwise run `az policy assignment list --disable-scope-strict-match --query "[].{policy:displayName, params:parameters}" -o json` and re-run with `LOCATION=<allowed region>` |
+| `SkuNotAvailable` | That VM size is out of capacity in the region: add `VM_SIZE=Standard_B1ms` (or another B-series size) |
+| `ResourceNotFound` for `...VMNic` right after VM creation | A CLI glitch in new regions: the VM usually exists. The script now checks and continues; on an older copy, open ports 80/443 with `az vm open-port` |
+| Build fails with pip `Read timed out` / `SSL: UNEXPECTED_EOF` while `curl https://pypi.org` works on the VM | Docker's packets are too large for the network path (MTU). cloud-init now sets MTU 1400 in `/etc/docker/daemon.json`; on an older VM write that file, `systemctl restart docker`, and rebuild |
+| Site not reachable after 15 minutes | `$RC "tail -n 50 /var/log/cloud-init-output.log"` (see Operate) shows where setup stopped |
+
 ## Cost
 
 - Check **Free services** in the portal: Azure free offers have included 750 hours/month of a B1s Linux VM for 12 months. Confirm it applies to your subscription.
@@ -41,11 +51,14 @@ Settings can be overridden: `LOCATION=eastus VM_SIZE=Standard_B1ms BRANCH=main b
 
 ## Operate
 
+Cloud Shell sessions are temporary, so the SSH key `provision.sh` generates there disappears with the session. `az vm run-command` needs no key. Set `RC='az vm run-command invoke -g ai-factory-rg -n ai-factory-vm --command-id RunShellScript --query value[0].message -o tsv --scripts'`, then:
+
 | Task | Command |
 |---|---|
-| Watch first-boot setup | `ssh azureuser@<fqdn> 'sudo tail -f /var/log/cloud-init-output.log'` |
-| Deploy a new version | `ssh azureuser@<fqdn> 'cd /opt/ai-factory && sudo git pull && sudo docker compose -f deploy/azure/compose.yaml up -d --build'` |
-| App logs | `ssh azureuser@<fqdn> 'sudo docker compose -f /opt/ai-factory/deploy/azure/compose.yaml logs -f app'` |
+| Check first-boot setup | `$RC "tail -n 8 /var/log/cloud-init-output.log; docker ps"` |
+| Deploy a new version | `$RC "cd /opt/ai-factory && git pull && docker compose -f deploy/azure/compose.yaml up -d --build"` |
+| App logs | `$RC "docker compose -f /opt/ai-factory/deploy/azure/compose.yaml logs --tail 50 app"` |
+| HTTPS not working yet | `$RC "docker compose -f /opt/ai-factory/deploy/azure/compose.yaml restart caddy"` (Caddy retries the certificate) |
 | Health check | `curl https://<fqdn>/api/health` (shows whether the Docker sandbox and analysis tools are available) |
 
 ## Design notes (worth knowing for interviews)

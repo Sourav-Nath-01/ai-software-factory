@@ -10,13 +10,16 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install Docker CLI (for sandboxed execution)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io curl \
+# Docker CLI for the sandbox: it talks to the host's daemon through the mounted socket.
+# Debian's docker.io client (API 1.41) is too old for current daemons, so take the
+# official static CLI binary; it negotiates the API version with the daemon.
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
-COPY pyproject.toml ./
+# Python deps (patient with slow package mirrors: a 15 s read timeout broke a real build)
+ENV PIP_DEFAULT_TIMEOUT=100 PIP_RETRIES=10
+COPY pyproject.toml README.md ./
 # analysis: bandit/flake8/pip-audit for review grounding
 # pytest: generated tests run in-process here (Spaces has no Docker daemon)
 RUN pip install --no-cache-dir -e ".[web,analysis]" pytest

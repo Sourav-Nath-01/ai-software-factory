@@ -29,7 +29,7 @@ from rich.table import Table
 from rich.tree import Tree
 
 # Agent prompt strings
-from src.agents.planner  import PLANNER_BACKSTORY,     PLAN_TASK_DESCRIPTION
+from src.agents.planner  import PLANNER_BACKSTORY,     PLAN_TASK_DESCRIPTION, PLAN_REVISION_TASK
 from src.agents.coder    import CODER_BACKSTORY,       CODE_TASK_DESCRIPTION
 from src.agents.reviewer import REVIEWER_BACKSTORY,    REVIEW_TASK_DESCRIPTION
 from src.agents.improver import IMPROVER_BACKSTORY,    IMPROVE_TASK_DESCRIPTION
@@ -154,6 +154,10 @@ def _parse_retry_after(text: str) -> float | None:
     return sum(float(n) * units[u] for n, u in re.findall(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", m.group(1)))
 
 
+# Rounds of "revise the plan with my feedback" before the review must approve or abort
+MAX_PLAN_REVISIONS = 3
+HITL_TIMEOUT_SECONDS = 300
+
 # Output token budget per call (shrunk automatically on low-TPM tiers)
 MAX_OUTPUT_TOKENS = 16384
 
@@ -217,6 +221,7 @@ class Pipeline:
         max_test_fix_iterations: Optional[int] = None,
         use_static_analysis: bool = True,
         use_memory: Optional[bool] = None,
+        require_approval: bool = True,
         # legacy param kept for backward compat (ignored when model/api_key used)
         llm=None,
     ):
@@ -258,6 +263,9 @@ class Pipeline:
         self._static_issues_initial: int | None = None
         self._static_issues_final: int | None = None
         self._security_audit = ""  # pip-audit report for the Reviewer
+        # Pause after planning for the user to approve or revise (API runs only)
+        self._require_approval = require_approval
+        self._plan_revisions = 0
         self._last_truncated = False  # did the last LLM response hit max_tokens?
         # Set to [] to record every raw LLM response (the eval harness does, for debugging)
         self.transcript: list[dict] | None = None
@@ -558,6 +566,7 @@ class Pipeline:
                 "static_issues_final":   self._static_issues_final,
                 "tests_passed": bool(self.state.test_result and self.state.test_result.passed),
                 "duration_seconds": round(duration, 1),
+                "plan_revisions": self._plan_revisions,
                 **self.usage,
             }
             self._emit({"type": "complete", "metrics": metrics})
@@ -592,11 +601,21 @@ class Pipeline:
             )
 
         data = _safe_json(result, {"project_name": "project", "tech_stack": [], "file_structure": [], "modules": []})
+        self.state.plan = self._plan_from_data(data)
 
+        self._print_plan_summary()
+        self._log(f"Architecture planned: {len(self.state.plan.file_structure)} files, stack: {', '.join(self.state.plan.tech_stack)}")
+        self._emit({"type": "stage_complete", "stage": "Planning", "icon": "🏗️",
+                    "duration": round(time.time() - t0, 1),
+                    "data": {"tech_stack": ", ".join(self.state.plan.tech_stack[:3])}})
+
+    @staticmethod
+    def _plan_from_data(data: dict) -> ProjectPlan:
+        """Build a ProjectPlan from the Planner's JSON, tolerating the shapes LLMs actually return."""
         # Normalize modules: LLMs sometimes return dicts instead of strings
         raw_modules = data.get("modules", [])
         modules: list[str] = []
-        for m in raw_modules:
+        for m in (raw_modules if isinstance(raw_modules, list) else []):
             if isinstance(m, str):
                 modules.append(m)
             elif isinstance(m, dict):
@@ -610,9 +629,9 @@ class Pipeline:
         for e in (raw_endpoints if isinstance(raw_endpoints, list) else []):
             if isinstance(e, dict):
                 endpoints.append({
-                    "method":      e.get("method", "GET"),
-                    "path":        e.get("path", "/"),
-                    "description": e.get("description", e.get("desc", "")),
+                    "method":      str(e.get("method") or "GET"),
+                    "path":        str(e.get("path") or "/"),
+                    "description": str(e.get("description") or e.get("desc") or ""),
                 })
 
         # Normalize file_structure: should be list of strings
@@ -624,42 +643,67 @@ class Pipeline:
             elif isinstance(f, dict):
                 file_structure.append(f.get("path", f.get("file", str(f))))
 
-        self.state.plan = ProjectPlan(
-            project_name=data.get("project_name", "project"),
-            description=data.get("description", ""),
-            tech_stack=[str(t) for t in data.get("tech_stack", [])],
+        tech_stack = data.get("tech_stack", [])
+        return ProjectPlan(
+            project_name=str(data.get("project_name") or "project"),
+            description=str(data.get("description") or ""),
+            tech_stack=[str(t) for t in tech_stack] if isinstance(tech_stack, list) else [],
             file_structure=file_structure,
             modules=modules,
             endpoints=endpoints,
-            additional_notes=str(data.get("additional_notes", "")),
+            additional_notes=str(data.get("additional_notes") or ""),
         )
 
-
-        self._print_plan_summary()
-        self._log(f"Architecture planned: {len(self.state.plan.file_structure)} files, stack: {', '.join(self.state.plan.tech_stack)}")
-        self._emit({"type": "stage_complete", "stage": "Planning", "icon": "🏗️",
-                    "duration": round(time.time() - t0, 1),
-                    "data": {"tech_stack": ", ".join(self.state.plan.tech_stack[:3])}})
-
     def _run_hitl_checkpoint(self):
-        """Human-in-the-Loop: pause after Planning so the user can approve the architecture.
+        """Human-in-the-loop: pause after planning until the user approves the architecture.
 
-        Only activates for real LLM runs (non-demo) started through the API.
-        - CLI mode (no run_id): skipped — no WebSocket to communicate with
-        - Demo mode: skipped — automated demo runs should complete without human input
-        - Real API run: emits hitl_checkpoint event and blocks until user approves
+        The user can approve (continue), revise (the Planner rewrites the plan from
+        their feedback and the review repeats, up to MAX_PLAN_REVISIONS times) or abort.
+        Skipped without a run_id (CLI, evals) or when the run didn't ask for approval.
         """
-        if not self._run_id or self.demo:
-            return  # Skip HITL in CLI mode or Demo mode
+        if not self._run_id or not self._require_approval:
+            return
+        from backend.ws import hitl_events, hitl_decisions, hitl_waiting
 
-        import threading as _threading
-        from backend.ws import hitl_events, hitl_decisions
+        event = hitl_events.get(self._run_id)
+        if event is None:
+            return
 
+        for revision in range(MAX_PLAN_REVISIONS + 1):
+            hitl_waiting.add(self._run_id)  # before the event goes out, so a fast reply is accepted
+            try:
+                self._emit_plan_for_review(revision)
+                self._log("👤 Waiting for your review of the architecture plan...")
+                console.print("\n  [bold yellow]⏸ HITL Checkpoint[/bold yellow] — waiting for the user to review the plan...")
+                # Block (zero CPU) until the frontend POSTs to /api/runs/{run_id}/approve
+                answered = event.wait(timeout=HITL_TIMEOUT_SECONDS)
+            finally:
+                hitl_waiting.discard(self._run_id)
+            if not answered:
+                raise RuntimeError(f"HITL timeout: the plan was not reviewed within {HITL_TIMEOUT_SECONDS // 60} minutes.")
+            decision = hitl_decisions.pop(self._run_id, {})
+            event.clear()  # ready for the next round
+            self._check_cancelled()
+
+            action = decision.get("action") or ("approve" if decision.get("approved", True) else "abort")
+            if action == "approve":
+                self._log("✅ Architecture approved — proceeding to code generation.")
+                console.print("  [bold green]✔ Architecture approved — continuing pipeline.[/bold green]")
+                self._emit({"type": "hitl_approved", "stage": "Architecture Approval"})
+                return
+            if action == "abort":
+                raise RuntimeError(f"Pipeline aborted by user: {decision.get('reason') or 'User rejected the architecture.'}")
+            if revision == MAX_PLAN_REVISIONS:
+                raise RuntimeError(f"Stopped: the plan was revised {MAX_PLAN_REVISIONS} times without approval.")
+            self._revise_plan(decision.get("feedback", ""), revision + 1)
+
+    def _emit_plan_for_review(self, revision: int):
         plan = self.state.plan
-        # Emit the checkpoint event to the frontend
         self._emit({
             "type": "hitl_checkpoint",
             "stage": "Architecture Approval",
+            "revision": revision,
+            "revisions_left": MAX_PLAN_REVISIONS - revision,
             "plan": {
                 "project_name":   plan.project_name,
                 "description":    plan.description,
@@ -667,26 +711,41 @@ class Pipeline:
                 "file_structure": plan.file_structure[:20],  # cap for WS payload
                 "modules":        plan.modules[:10],
                 "endpoints":      [{"method": e.method, "path": e.path, "description": e.description} for e in plan.endpoints[:8]],
-            }
+            },
         })
-        self._log("👤 Waiting for human approval of architecture plan...")
-        console.print("\n  [bold yellow]⏸ HITL Checkpoint[/bold yellow] — waiting for human to approve architecture...")
 
-        # Block until the frontend POSTs to /api/runs/{run_id}/approve
-        event: _threading.Event | None = hitl_events.get(self._run_id)
-        if event:
-            approved = event.wait(timeout=300)  # wait up to 5 minutes
-            if not approved:
-                raise RuntimeError("HITL timeout: user did not approve architecture within 5 minutes.")
+    def _revise_plan(self, feedback: str, revision: int):
+        """Ask the Planner to rewrite the current plan according to the user's feedback."""
+        t0 = time.time()
+        self.state.current_stage = PipelineStage.PLANNING
+        self._emit({"type": "hitl_revising", "feedback": feedback, "revision": revision})
+        self._emit({"type": "stage_start", "stage": "Planning", "icon": "🏗️", "meta": f"Revision {revision}"})
+        self._log(f"📝 Revising the plan with your feedback: {feedback[:200]}")
 
-            decision = hitl_decisions.get(self._run_id, {})
-            if not decision.get("approved", True):
-                reason = decision.get("reason", "User rejected the architecture.")
-                raise RuntimeError(f"Pipeline aborted by user: {reason}")
+        with console.status("[bold cyan]  Architect agent revising the plan...[/bold cyan]", spinner="dots"):
+            result = self._call_llm(
+                system=PLANNER_BACKSTORY,
+                user=PLAN_REVISION_TASK.format(
+                    user_request=self.state.user_request,
+                    plan=self.state.plan.model_dump_json(indent=2),
+                    feedback=feedback,
+                ),
+            )
+        data = _safe_json(result, {})
+        if data:
+            self.state.plan = self._plan_from_data(data)
+        else:
+            self._log("⚠ The revised plan couldn't be parsed — keeping the previous plan.")
+        # The Coder sees the user's words verbatim, even if the Planner missed part of them
+        self.state.plan.additional_notes = (
+            f"{self.state.plan.additional_notes}\nUser feedback on the plan (revision {revision}): {feedback}"
+        ).strip()
+        self._plan_revisions = revision
 
-            self._log("✅ Architecture approved by user — proceeding to code generation.")
-            console.print("  [bold green]✔ Architecture approved — continuing pipeline.[/bold green]")
-            self._emit({"type": "hitl_approved", "stage": "Architecture Approval"})
+        self._log(f"Plan revised: {len(self.state.plan.file_structure)} files, stack: {', '.join(self.state.plan.tech_stack)}")
+        self._emit({"type": "stage_complete", "stage": "Planning", "icon": "🏗️",
+                    "duration": round(time.time() - t0, 1),
+                    "data": {"revision": revision, "tech_stack": ", ".join(self.state.plan.tech_stack[:3])}})
 
     def _run_coding(self):
         t0 = time.time()

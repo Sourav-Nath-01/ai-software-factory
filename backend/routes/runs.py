@@ -74,7 +74,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
                 model = "demo"
 
             from src.core.pipeline import Pipeline
-            from backend.ws import hitl_events, hitl_decisions, cancel_events
+            from backend.ws import hitl_events, hitl_decisions, hitl_waiting, cancel_events
 
             # Create HITL event for this run — pipeline will block on it after Planning
             hitl_event = _threading.Event()
@@ -102,6 +102,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
                 cancel_event=cancel_event,
                 max_review_iterations=req.max_review_iterations,
                 max_test_fix_iterations=req.max_test_fix_iterations,
+                require_approval=req.require_approval,
             )
             state = pipeline.run(req.prompt)
 
@@ -136,6 +137,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks):
             # Clean up HITL and cancel state for this run
             hitl_events.pop(run_id, None)
             hitl_decisions.pop(run_id, None)
+            hitl_waiting.discard(run_id)
             cancel_events.pop(run_id, None)
             event_queue.put(None)
             _run_slots.release()

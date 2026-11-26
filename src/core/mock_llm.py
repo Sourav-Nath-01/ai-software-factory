@@ -5,8 +5,9 @@ pre-built response to return, so it never breaks when optional stages are skippe
 """
 
 import json
-import time
 import random
+import re
+import time
 
 from src.core.config import settings
 
@@ -328,7 +329,8 @@ MOCK_REVIEW_FLAWED = {
             "category": "security",
             "description": "SQL injection: search_todos builds its query with an f-string, "
                            "so the q parameter is executed as SQL (bandit B608).",
-            "suggestion": "Use a parameterised query: conn.execute(\"... WHERE title LIKE ?\", (f\"%{q}%\",)).",
+            "suggestion": "Use a parameterised query: "
+                          "conn.execute(\"... WHERE title LIKE ?\", (f\"%{q}%\",)).",
             "line_number": 22,
         },
         MOCK_REVIEW["comments"][0],
@@ -413,6 +415,15 @@ MOCK_DEPLOYMENT = {
 
 # ── Stage-aware MockLLM ────────────────────────────────────────
 
+def _revised_plan(prompt: str) -> dict:
+    """The mock Planner's answer to a revision request: the plan, visibly updated with the feedback."""
+    match = re.search(r"## User Feedback\n(.*?)\n\n## Rules", prompt, re.DOTALL)
+    feedback = match.group(1).strip() if match else ""
+    return {**MOCK_PLAN,
+            "description": f"{MOCK_PLAN['description']} Revised per review: {feedback}",
+            "additional_notes": f"{MOCK_PLAN['additional_notes']} Review feedback applied: {feedback}"}
+
+
 class MockLLM:
     """Fake LLM for demo mode — selects responses by stage, not by call count.
 
@@ -430,6 +441,8 @@ class MockLLM:
         # (e.g. CODER_BACKSTORY says "architecture plan" so "architect" is ambiguous)
 
         if "world-class software architect" in s or "20 years of experience designing" in s:
+            if "Revise this architecture plan" in user:
+                return json.dumps(_revised_plan(user))
             return json.dumps(MOCK_PLAN)
 
         if "qa analyst who specializes in analyzing test results" in s or "test runner" in s:

@@ -7,6 +7,10 @@ services:
     environment:
       OUTPUT_DIR: /srv/ai-factory/output
       MAX_CONCURRENT_RUNS: "2"   # a small VM: refuse extra runs with HTTP 429 instead of running out of memory
+      # Public server: if the Docker sandbox is unavailable, refuse to run generated
+      # code rather than fall back to a plain subprocess inside this container
+      # (which holds the Docker socket, i.e. control of the VM).
+      ALLOW_UNSANDBOXED_EXEC: "false"
       CORS_ORIGINS: https://${SITE_ADDRESS}
     volumes:
       # The sandbox starts sibling containers on the host's Docker daemon ...

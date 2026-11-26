@@ -19,6 +19,7 @@ class RunRequest(BaseModel):
     model: str = Field("gemini/gemini-2.5-flash", description="Full LiteLLM model string")
     max_review_iterations: int = Field(2, ge=1, le=5)
     max_test_fix_iterations: int = Field(2, ge=1, le=5)
+    require_approval: bool = Field(True, description="Pause after planning for the user to approve or revise the plan")
 
 
 class RunStatus(str, Enum):
@@ -43,6 +44,7 @@ class RunMetrics(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0                         # list-price equivalent
+    plan_revisions: int = 0                       # rounds of user feedback on the plan
 
 
 class CodeFileResponse(BaseModel):

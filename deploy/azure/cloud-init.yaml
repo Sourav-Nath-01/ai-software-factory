@@ -7,6 +7,14 @@ packages:
   - ca-certificates
   - curl
 
+write_files:
+  # Containers on this network sent packets too large for the path: the host reached
+  # PyPI in 0.4 s while every container's TLS handshake died (SSL UNEXPECTED_EOF).
+  # A smaller MTU for docker0, build containers and compose networks fixes it.
+  - path: /etc/docker/daemon.json
+    content: |
+      {"mtu": 1400, "default-network-opts": {"bridge": {"com.docker.network.driver.mtu": "1400"}}}
+
 runcmd:
   # 2 GB swap: a 1 GiB VM needs it to build the frontend and run a sandbox container
   - fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
