@@ -1,7 +1,5 @@
 """Code Generator Agent — writes actual code files."""
 
-from crewai import Agent, Task
-
 CODER_BACKSTORY = """You are an elite software engineer who writes clean, production-ready
 code. You follow best practices religiously: proper error handling, input validation,
 clear variable names, comprehensive docstrings, and type hints.
@@ -29,31 +27,8 @@ CODE_TASK_DESCRIPTION = """Generate complete, production-ready code for the foll
 5. Every file must be complete — no placeholders, no TODOs, no "..." 
 6. Include all imports, error handling, and documentation
 7. Make the code production-ready
+8. List every third-party dependency in a requirements.txt file — tests run offline in a
+   sandbox where only declared dependencies are installed
 
 Output ONLY valid JSON. No extra text.
 """
-
-
-def create_coder_agent(llm) -> Agent:
-    """Create the Code Generator agent."""
-    return Agent(
-        role="Senior Software Engineer",
-        goal=(
-            "Write clean, complete, production-ready code that follows "
-            "the architecture plan exactly, with proper error handling "
-            "and documentation."
-        ),
-        backstory=CODER_BACKSTORY,
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-
-
-def create_code_task(agent: Agent, plan_json: str) -> Task:
-    """Create the code generation task."""
-    return Task(
-        description=CODE_TASK_DESCRIPTION.format(plan=plan_json),
-        expected_output="A valid JSON object with a 'files' list containing all code files.",
-        agent=agent,
-    )

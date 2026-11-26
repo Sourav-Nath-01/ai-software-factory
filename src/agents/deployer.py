@@ -1,7 +1,5 @@
 """Deployment Agent — creates deployment infrastructure."""
 
-from crewai import Agent, Task
-
 DEPLOYER_BACKSTORY = """You are a senior DevOps engineer who creates production-ready
 deployment configurations. You follow the principle of infrastructure as code and
 make deployments reproducible, secure, and well-documented.
@@ -40,32 +38,3 @@ Generate the following deployment files:
 
 Output ONLY valid JSON. No extra text.
 """
-
-
-def create_deployer_agent(llm) -> Agent:
-    """Create the Deployment agent."""
-    return Agent(
-        role="Senior DevOps Engineer",
-        goal=(
-            "Create production-ready deployment infrastructure with "
-            "Docker, CI/CD, and clear deployment instructions."
-        ),
-        backstory=DEPLOYER_BACKSTORY,
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-
-
-def create_deploy_task(
-    agent: Agent, plan_json: str, codebase_json: str
-) -> Task:
-    """Create the deployment task."""
-    return Task(
-        description=DEPLOY_TASK_DESCRIPTION.format(
-            plan=plan_json,
-            codebase=codebase_json,
-        ),
-        expected_output="A valid JSON object with deployment 'files' and 'instructions'.",
-        agent=agent,
-    )

@@ -1,7 +1,5 @@
 """Code Reviewer Agent — reviews code like a senior engineer."""
 
-from crewai import Agent, Task
-
 REVIEWER_BACKSTORY = """You are a meticulous senior code reviewer with deep expertise in
 software security, performance, and clean code principles. You review code like you're
 protecting a production system serving millions of users.
@@ -55,27 +53,3 @@ REVIEW_TASK_DESCRIPTION = """Review the following codebase thoroughly.
 Check every file. Focus on critical and security issues first.
 Output ONLY valid JSON. No extra text.
 """
-
-
-def create_reviewer_agent(llm) -> Agent:
-    """Create the Code Reviewer agent."""
-    return Agent(
-        role="Senior Code Reviewer",
-        goal=(
-            "Find all bugs, security issues, performance problems, and "
-            "code quality issues. Provide specific, actionable feedback."
-        ),
-        backstory=REVIEWER_BACKSTORY,
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-
-
-def create_review_task(agent: Agent, codebase_json: str) -> Task:
-    """Create the code review task."""
-    return Task(
-        description=REVIEW_TASK_DESCRIPTION.format(codebase=codebase_json),
-        expected_output="A valid JSON object with review comments, quality rating, and summary.",
-        agent=agent,
-    )

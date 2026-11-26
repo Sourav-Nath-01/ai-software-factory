@@ -1,7 +1,5 @@
 """Test Generator Agent — writes automated tests."""
 
-from crewai import Agent, Task
-
 TESTER_BACKSTORY = """You are a QA test engineer who writes comprehensive, well-structured
 test suites. You believe in testing every code path: happy paths, edge cases, error
 conditions, and boundary values.
@@ -39,32 +37,3 @@ TEST_TASK_DESCRIPTION = """Generate comprehensive automated tests for the follow
 
 Output ONLY valid JSON. No extra text.
 """
-
-
-def create_tester_agent(llm) -> Agent:
-    """Create the Test Generator agent."""
-    return Agent(
-        role="QA Test Engineer",
-        goal=(
-            "Write comprehensive pytest tests covering all functions, "
-            "edge cases, error conditions, and integration scenarios."
-        ),
-        backstory=TESTER_BACKSTORY,
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-
-
-def create_test_task(
-    agent: Agent, codebase_json: str, plan_json: str
-) -> Task:
-    """Create the test generation task."""
-    return Task(
-        description=TEST_TASK_DESCRIPTION.format(
-            codebase=codebase_json,
-            plan=plan_json,
-        ),
-        expected_output="A valid JSON object with test 'files' list.",
-        agent=agent,
-    )
