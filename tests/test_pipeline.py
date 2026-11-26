@@ -31,6 +31,14 @@ class TestExtractJson:
         data = self._call('Here is the plan:\n\n{"project_name":"bar"}\n\nDone!')
         assert data["project_name"] == "bar"
 
+    def test_code_fences_inside_json_strings_are_kept(self):
+        """Regression: a README with a ```bash block used to make the parser drop every file."""
+        payload = json.dumps({"files": [
+            {"file_path": "README.md", "content": "# Tool\n\n```bash\npip install .\n```\n"},
+            {"file_path": "app.py", "content": "x = 1"}]}, indent=2)
+        assert len(self._call(payload)["files"]) == 2
+        assert len(self._call("```json\n" + payload + "\n```")["files"]) == 2
+
     def test_trailing_comma_repaired(self):
         data = self._call('{"a":1,"b":2,}')
         assert data["a"] == 1
@@ -180,13 +188,259 @@ class TestPipelineDemo:
         assert m["lines_of_code"] > 0
         assert "duration_seconds" in m
 
+    def test_generated_tests_really_pass(self, pipeline):
+        """tests_passed comes from pytest's exit code, not the analyst LLM's claim."""
+        state = pipeline.run("Build a todo API")
+        assert state.test_result.passed, state.test_result.stdout[-2000:]
+
+    def test_demo_shows_a_verified_security_fix(self, pipeline):
+        """The demo's story: bandit finds the SQL injection, the Improver fixes it, the tools confirm it."""
+        from src.core.static_analysis import BANDIT_AVAILABLE
+        if not BANDIT_AVAILABLE:
+            pytest.skip("bandit not installed")
+        events = []
+        pipeline.event_callback = events.append
+        state = pipeline.run("Build a todo API")
+        metrics = next(e["metrics"] for e in events if e["type"] == "complete")
+        assert metrics["issues_fixed"] >= 1
+        assert metrics["static_issues_final"] < metrics["static_issues_initial"]
+        router = state.codebase.get_file("app/routers/todos.py").content
+        assert "LIKE '%{q}%'" not in router and 'LIKE ?' in router
+        assert state.test_result.passed
+
     def test_output_written_to_disk(self, pipeline, tmp_path):
         pipeline.run("Build a hello world API")
         project_dirs = [d for d in tmp_path.iterdir() if not d.name.startswith("_")]
         assert len(project_dirs) >= 1
 
 
-# ─── 5. FastAPI endpoints ─────────────────────────────────────
+# ─── 5. Regression tests for pipeline robustness fixes ────────
+
+class TestPipelineRobustness:
+    @pytest.fixture
+    def pipeline(self):
+        from src.core.pipeline import Pipeline
+        from src.core.models import CodeBase, PipelineState
+        p = Pipeline(demo=True)
+        p.state = PipelineState(user_request="x")
+        p.state.codebase = CodeBase()
+        return p
+
+    def test_prompt_budget_never_cuts_a_file(self, pipeline):
+        from src.core.pipeline import Pipeline
+        for i in range(5):
+            pipeline.state.codebase.set_file(f"f{i}.py", "x = 1\n" * 400)
+        text = Pipeline._codebase_for_prompt(pipeline.state.codebase, max_chars=6000)
+        body, _, omitted = text.partition("\n\n[Omitted")
+        included = json.loads(body)["files"]   # still valid JSON
+        assert all(f["content"] == "x = 1\n" * 400 for f in included)
+        assert 0 < len(included) < 5
+        assert all(f"f{i}.py" in omitted for i in range(len(included), 5))
+
+    def test_improver_output_merges_instead_of_replacing(self, pipeline):
+        pipeline.state.codebase.set_file("a.py", "a = 1")
+        pipeline.state.codebase.set_file("b.py", "b = 1")
+        changed = pipeline._merge_files([{"file_path": "a.py", "content": "a = 2"}, {"content": "no path"}])
+        assert changed == 1
+        assert pipeline.state.codebase.get_file("a.py").content == "a = 2"
+        assert pipeline.state.codebase.get_file("b.py").content == "b = 1"
+        assert len(pipeline.state.codebase.files) == 2
+
+    def test_malformed_file_entries_are_skipped_not_fatal(self, pipeline):
+        """Regression: a string inside "files" crashed the Tester/Deployer with 'str'.get."""
+        from src.core.pipeline import _valid_files
+        files = ["oops", None, {"content": "no path"}, {"file_path": "  "},
+                 {"file_path": "Dockerfile", "content": None}, {"file_path": "a.py", "content": "x = 1"}]
+        assert [f["file_path"] for f in _valid_files(files, default_language="yaml")] == ["Dockerfile", "a.py"]
+        assert _valid_files("not a list") == [] and _valid_files({"a.py": "x"}) == []
+        assert pipeline._merge_files(files) == 2
+
+    def test_truncated_response_drops_the_cut_off_file(self, pipeline):
+        """Regression: a response cut at max_tokens planted half-written files (ending in `parents[1`)."""
+        # The cut-off content contains a '}' (an f-string), like the real failures did
+        cut_off = ('{"files": [{"file_path": "a.py", "content": "x = 1"}, '
+                   '{"file_path": "b.py", "content": "r = client.get(f\\"/todos/{todo_id}\\")\\nsys.path.append(p.parents[1')
+        pipeline._last_truncated = True
+        files = pipeline._response_files(cut_off)
+        assert [f["file_path"] for f in files] == ["a.py"] and files[0]["content"] == "x = 1"
+
+    def test_truncated_response_keeps_contents_byte_exact(self, pipeline):
+        """Regression: json_repair shifted whitespace in strings when repairing a cut-off response."""
+        originals = [{"file_path": f"f{i}.py", "content": f"\n    x = {{'k': {i}}}\n\ttab\n", "language": "python"}
+                     for i in range(30)]
+        full = json.dumps({"files": originals}, indent=2)
+        pipeline._last_truncated = True
+        for cut in range(200, len(full), 97):
+            got = pipeline._response_files(full[:cut])
+            assert got == originals[:len(got)]
+            assert len(got) >= full[:cut].count("}\n    }") - 1
+
+    def test_loop_limits_are_per_run(self):
+        from src.core.pipeline import Pipeline
+        from src.core.config import settings
+        before = settings.max_review_iterations
+        p = Pipeline(demo=True, max_review_iterations=5, max_test_fix_iterations=4)
+        assert (p._max_review_iterations, p._max_test_fix_iterations) == (5, 4)
+        assert settings.max_review_iterations == before
+
+    def test_memory_write_failure_does_not_raise(self):
+        from src.core.memory import AgentMemory
+
+        class Broken:
+            def upsert(self, **_):
+                raise TimeoutError("The read operation timed out in upsert.")
+
+        mem = AgentMemory("t")
+        mem._initialised, mem._collection = True, Broken()
+        mem.store("content", {"k": "v"})
+        assert mem._fallback
+
+    def test_finding_keys_ignore_line_numbers(self):
+        from src.core.static_analysis import AnalysisReport
+        before = AnalysisReport(
+            security_issues=[{"filename": "app/db.py", "test_id": "B608", "issue_text": "SQL injection", "line_number": 10}],
+            style_issues=["app/main.py:3:1: F401 'os' imported but unused"])
+        after = AnalysisReport(
+            security_issues=[{"filename": "app/db.py", "test_id": "B608", "issue_text": "SQL injection", "line_number": 42}],
+            style_issues=[])
+        assert len(before.code_finding_keys() - after.code_finding_keys()) == 1
+
+    def test_verified_fixes_use_real_tools(self, pipeline):
+        from src.core.static_analysis import analyzer, BANDIT_AVAILABLE, FLAKE8_AVAILABLE
+        if not (BANDIT_AVAILABLE and FLAKE8_AVAILABLE):
+            pytest.skip("bandit/flake8 not installed")
+        pipeline.state.codebase.set_file("app/a.py", "import os\nimport subprocess\nsubprocess.call('ls', shell=True)\n")
+        pipeline.state.codebase.set_file("app/b.py", "x = 1\n")
+        pipeline._static_initial_keys = analyzer.run_code_review(pipeline._python_files()).code_finding_keys()
+        assert pipeline._static_initial_keys
+        # The "Improver" removes the unused import and the shell=True call
+        pipeline.state.codebase.set_file("app/a.py", "import subprocess\nsubprocess.call(['ls'])\n")
+        pipeline._verify_static_fixes()
+        assert pipeline._issues_fixed > 0
+        assert pipeline._static_issues_final < pipeline._static_issues_initial
+
+    def test_oversized_request_does_not_deadlock_rate_limiter(self):
+        from src.core.rate_limiter import TokenBucket
+        bucket = TokenBucket(tpm=1000, rpm=30)
+        slept = []
+        bucket.consume("x" * 40_000, sleep=slept.append)   # ~10k tokens > 1k capacity
+        assert sum(slept) == 0                              # full bucket serves it at once
+
+    def test_limits_follow_provider_not_model_name(self):
+        from src.core.rate_limiter import _resolve_limits, PROVIDER_LIMITS
+        assert _resolve_limits("groq/openai/gpt-oss-120b") is PROVIDER_LIMITS["groq"]   # not OpenAI's
+        assert _resolve_limits("gemini/gemini-2.5-flash") is PROVIDER_LIMITS["gemini"]
+        assert _resolve_limits("gpt-4o-mini") is PROVIDER_LIMITS["openai"]
+
+    def test_daily_quota_and_retry_hints(self):
+        from src.core.pipeline import _DAILY_QUOTA_MARKERS, _parse_retry_after
+        groq = "rate limit reached on tokens per day (tpd): limit 200000. please try again in 11m57.552s."
+        assert any(m in groq for m in _DAILY_QUOTA_MARKERS)
+        assert _parse_retry_after(groq) == pytest.approx(717.552)
+        assert _parse_retry_after("please try again in 7.25s") == pytest.approx(7.25)
+        assert _parse_retry_after("try again in 450ms") == pytest.approx(0.45)
+        assert _parse_retry_after("no hint here") is None
+        assert not any(m in "rate limit reached on tokens per minute (tpm)" for m in _DAILY_QUOTA_MARKERS)
+
+    def test_reasoning_models_get_low_effort(self):
+        from src.core.pipeline import _model_specific_params
+        assert _model_specific_params("groq/openai/gpt-oss-120b") == {"reasoning_effort": "low"}
+        assert _model_specific_params("gemini/gemini-2.5-flash") == {"reasoning_effort": "low"}
+        assert _model_specific_params("gpt-4o-mini") == {}
+
+    def test_unused_output_reservation_is_refunded(self):
+        from src.core.rate_limiter import TokenBucket
+        bucket = TokenBucket(tpm=8000, rpm=30)
+        bucket.consume("x" * 4000, sleep=lambda s: None, extra_tokens=6000)  # reserves 7000
+        bucket.reconcile(reserved=7000, actual=1500)
+        slept = []
+        bucket.consume("x" * 4000, sleep=slept.append, extra_tokens=5000)    # 6000 more fits now
+        assert sum(slept) == 0
+
+    def test_cancel_interrupts_rate_limit_wait(self):
+        import threading
+        from src.core.pipeline import Pipeline, PipelineCancelledError
+        cancel = threading.Event()
+        p = Pipeline(demo=True, cancel_event=cancel)
+        threading.Timer(0.2, cancel.set).start()
+        t0 = time.time()
+        with pytest.raises(PipelineCancelledError):
+            p._sleep(30)
+        assert time.time() - t0 < 5
+
+    def test_review_comment_normalization(self):
+        from src.core.pipeline import _normalize_severity
+        assert [_normalize_severity(s) for s in ("High", "BLOCKER", "medium", None, "weird")] == \
+            ["critical", "critical", "warning", "info", "info"]
+
+    def test_memory_retrieval_feeds_reviewer(self, pipeline, monkeypatch):
+        from src.core import pipeline as pipeline_mod
+        from src.core.memory import AgentMemory
+        from src.core.models import ProjectPlan, ReviewReport, ReviewComment
+        mem = AgentMemory("t")
+        mem._initialised = True                       # in-memory fallback, no ChromaDB
+        monkeypatch.setattr(pipeline_mod, "reviewer_memory", mem)
+        pipeline._use_memory = True
+        pipeline.state.plan = ProjectPlan(project_name="p", description="todo API", tech_stack=["FastAPI"],
+                                          file_structure=[], modules=[])
+        assert pipeline._recall_past_issues() == ""   # nothing remembered yet
+        pipeline._remember_issues(ReviewReport(comments=[
+            ReviewComment(file_path="a.py", severity="critical", category="security", description="SQL injection in search"),
+            ReviewComment(file_path="a.py", severity="info", category="style", description="naming"),
+        ]))
+        recalled = pipeline._recall_past_issues()
+        assert "SQL injection in search" in recalled and "naming" not in recalled
+
+    def test_file_writer_rejects_sibling_dir_escape(self, tmp_path):
+        from src.tools.file_writer import write_project_files
+        out = tmp_path / "proj"
+        written = write_project_files([{"file_path": "../proj2/evil.py", "content": "x"},
+                                       {"file_path": "ok.py", "content": "x"}], out)
+        assert written == [str((out / "ok.py").resolve())]
+        assert not (tmp_path / "proj2").exists()
+
+    def test_zip_entries_cannot_escape(self):
+        from backend.routes.runs import _safe_zip_name
+        assert _safe_zip_name("app/./main.py") == "app/main.py"
+        assert _safe_zip_name("/etc/passwd") == "etc/passwd"
+        assert _safe_zip_name("../../.bashrc") is None
+        assert _safe_zip_name("C:/x.py") is None
+
+    def test_run_store_concurrent_updates_keep_all_fields(self, tmp_path):
+        import backend.store.run_store as rs_mod
+        orig, rs_mod.STORE_DIR = rs_mod.STORE_DIR, tmp_path
+        try:
+            store = rs_mod.RunStore()
+            rid = store.create_run("x" * 20, "demo")
+            threads = [threading.Thread(target=store.update_initial_codebase, args=(rid, [{"f": 1}])),
+                       threading.Thread(target=store.update_complete, args=(rid, {"files_generated": 1}, []))]
+            for t in threads: t.start()
+            for t in threads: t.join()
+            run = store.get_run(rid)
+            assert run["initial_files"] == [{"f": 1}] and run["status"] == "complete"
+            assert not list(tmp_path.glob("*.tmp"))
+        finally:
+            rs_mod.STORE_DIR = orig
+
+    def test_sandbox_installs_pyproject_dependencies(self, tmp_path):
+        """Regression: deps declared only in pyproject.toml were never installed."""
+        from src.core.sandbox import collect_requirements
+        (tmp_path / "requirements.txt").write_text("requests==2.32.0\n")
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\ndependencies = [\n  "click>=8.1",\n  \'rich\',\n]\n\n[tool.x]\nother = ["no"]\n')
+        reqs = collect_requirements(tmp_path).splitlines()
+        assert reqs == ["requests==2.32.0", "click>=8.1", "rich"]
+
+    def test_unsandboxed_exec_hides_secrets(self, monkeypatch):
+        from src.core import sandbox
+        monkeypatch.setenv("GROQ_API_KEY", "secret")
+        monkeypatch.setenv("SOME_TOKEN", "secret")
+        env = sandbox._scrubbed_env()
+        assert "GROQ_API_KEY" not in env and "SOME_TOKEN" not in env
+        assert "PATH" in env
+
+
+# ─── 6. FastAPI endpoints ─────────────────────────────────────
 
 @pytest.fixture
 def client(tmp_path):
@@ -218,6 +472,24 @@ class TestAPI:
 
     def test_get_missing_run_404(self, client):
         assert client.get("/api/runs/no-such-id").status_code == 404
+
+    def test_busy_server_refuses_extra_runs(self, client, monkeypatch):
+        """With every run slot taken, a new run gets 429 and leaves no record behind."""
+        import threading
+        import backend.routes.runs as runs_mod
+        full = threading.BoundedSemaphore(1)
+        full.acquire()
+        monkeypatch.setattr(runs_mod, "_run_slots", full)
+        r = client.post("/api/run", json={"prompt": "Build a simple calculator API", "provider": "demo", "model": "demo"})
+        assert r.status_code == 429
+        assert client.get("/api/runs").json() == []
+
+    def test_real_provider_without_key_is_rejected(self, client):
+        """A missing key must not silently fall back to mock output."""
+        r = client.post("/api/run", json={"prompt": "Build a simple calculator API", "provider": "groq",
+                                          "model": "groq/openai/gpt-oss-120b"})
+        assert r.status_code == 400
+        assert client.get("/api/runs").json() == []
 
     def test_start_demo_run(self, client):
         r = client.post("/api/run", json={
