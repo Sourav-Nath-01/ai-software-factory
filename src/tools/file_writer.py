@@ -25,8 +25,9 @@ def write_project_files(files: list[dict], output_dir: Path) -> list[str]:
         rel_path = file_info["file_path"].lstrip("/")
         full_path = (output_dir / rel_path).resolve()
 
-        # Safety: ensure we stay within output_dir
-        if not str(full_path).startswith(str(output_dir)):
+        # Safety: ensure we stay within output_dir. (A string-prefix check would
+        # wrongly accept a sibling like "<output_dir>2/..." via "../")
+        if not full_path.is_relative_to(output_dir):
             console.print(
                 f"  [red]✗ Skipped dangerous path: {rel_path}[/red]"
             )

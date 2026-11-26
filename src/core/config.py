@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     # --- Dry Run ---
     dry_run: bool = False
 
+    # --- Demo Mode ---
+    demo_delay_scale: float = 1.0  # multiplier for simulated LLM latency (0 = instant, used by tests)
+
+    # --- Agent Memory ---
+    enable_memory: bool = True  # ChromaDB persistence; failures never break a run
+
+    # --- Code Execution Sandbox ---
+    use_docker_sandbox: bool = True       # run generated tests in Docker when available
+    allow_unsandboxed_exec: bool = True   # fall back to a plain subprocess when Docker is unavailable
+
+    # --- Server capacity ---
+    max_concurrent_runs: int = 4  # extra runs get HTTP 429 instead of exhausting a small server
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @property
