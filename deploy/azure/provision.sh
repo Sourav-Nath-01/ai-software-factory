@@ -24,13 +24,27 @@ CLOUD_INIT="$(mktemp)"
 sed -e "s|__REPO_URL__|$REPO_URL|g" -e "s|__BRANCH__|$BRANCH|g" -e "s|__FQDN__|$FQDN|g" \
     "$HERE/cloud-init.yaml" > "$CLOUD_INIT"
 
-echo "Creating resource group $RESOURCE_GROUP in $LOCATION ..."
-az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+# Student subscriptions only allow a few regions: check before creating anything
+ALLOWED="$(az policy assignment list --disable-scope-strict-match \
+  --query "[].parameters.listOfAllowedLocations.value[]" --output tsv 2>/dev/null | sort -u | tr '\n' ' ' || true)"
+if [ -n "${ALLOWED// /}" ] && ! grep -qw -- "$LOCATION" <<<"$ALLOWED"; then
+  echo "Region '$LOCATION' isn't allowed for this subscription. Allowed regions: $ALLOWED" >&2
+  echo "Re-run with one of them:  LOCATION=<region> bash $0" >&2
+  exit 1
+fi
+
+if az group show --name "$RESOURCE_GROUP" --output none 2>/dev/null; then
+  echo "Using existing resource group $RESOURCE_GROUP (the VM still goes to $LOCATION) ..."
+else
+  echo "Creating resource group $RESOURCE_GROUP in $LOCATION ..."
+  az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+fi
 
 echo "Creating VM $VM_NAME ($VM_SIZE, Ubuntu 24.04) ..."
-az vm create \
+if ! az vm create \
   --resource-group "$RESOURCE_GROUP" \
   --name "$VM_NAME" \
+  --location "$LOCATION" \
   --image Ubuntu2404 \
   --size "$VM_SIZE" \
   --admin-username "$ADMIN_USER" \
@@ -39,7 +53,11 @@ az vm create \
   --public-ip-address-dns-name "$DNS_LABEL" \
   --os-disk-size-gb 30 \
   --custom-data "$CLOUD_INIT" \
-  --output none
+  --output none; then
+  # In new regions the CLI's follow-up lookup can fail although the VM was created
+  az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --output none 2>/dev/null || exit 1
+  echo "The CLI reported an error, but the VM exists and is set up from cloud-init — continuing."
+fi
 
 echo "Opening ports 80 and 443 ..."
 az vm open-port --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --port 80 --priority 1010 --output none
@@ -51,7 +69,11 @@ cat <<EOF
 Done. First boot installs Docker and builds the app: allow about 10-15 minutes.
 
   App:            https://$FQDN
-  Watch setup:    ssh $ADMIN_USER@$FQDN 'sudo tail -f /var/log/cloud-init-output.log'
-  Update later:   ssh $ADMIN_USER@$FQDN 'cd /opt/ai-factory && sudo git pull && sudo docker compose -f deploy/azure/compose.yaml up -d --build'
+  Check setup (no SSH key needed):
+    az vm run-command invoke -g $RESOURCE_GROUP -n $VM_NAME --command-id RunShellScript \
+      --scripts "tail -n 8 /var/log/cloud-init-output.log; docker ps" --query "value[0].message" -o tsv
+  Update later:
+    az vm run-command invoke -g $RESOURCE_GROUP -n $VM_NAME --command-id RunShellScript \
+      --scripts "cd /opt/ai-factory && git pull && docker compose -f deploy/azure/compose.yaml up -d --build"
   Delete all:     az group delete --name $RESOURCE_GROUP
 EOF
