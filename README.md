@@ -13,7 +13,7 @@ short_description: 7 AI agents collaborate to build your software end-to-end
 
 > **A multi-agent LLM pipeline that plans, codes, reviews, tests, and packages software for deployment — with tool-grounded review, sandboxed test execution, and a reproducible eval harness. Runs on free-tier LLMs (Gemini / Groq).**
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Try%20it%20on%20Hugging%20Face-ffcc00?logo=huggingface)](https://huggingface.co/spaces/SouravNath/ai-software-factory)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Try%20it%20on%20Azure-0078D4?logo=microsoftazure)](https://ai-factory-14861.indiasouthcentral.cloudapp.azure.com)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green?logo=fastapi)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18+-61DAFB?logo=react)](https://reactjs.org)
@@ -29,7 +29,7 @@ short_description: 7 AI agents collaborate to build your software end-to-end
 3. **Verified Metrics:** "Issues fixed" is only counted when the tools agree — findings present before the review loop must be gone after it. "Tests passed" comes from pytest's exit code, never from an agent's claim.
 4. **Sandboxed Test Execution:** Generated tests run in Docker with `--network none` and CPU/memory/process limits; dependencies are installed in a separate container and cached by requirements hash. Without Docker it falls back to a subprocess with secrets scrubbed from its environment.
 5. **Proactive Token Bucket Rate Limiting:** Estimates request tokens and waits *before* calling the API when the bucket (tokens/min + requests/min) is low, instead of reacting to `429` errors. Reactive retry remains as a fallback.
-6. **Human-in-the-Loop Checkpoint:** The pipeline pauses on a `threading.Event` after Planning so the user can approve or reject the architecture before code generation.
+6. **Human-in-the-Loop Plan Review:** The pipeline pauses on a `threading.Event` after Planning. The user approves the architecture, **revises it with feedback** (the Planner rewrites the plan and the review repeats, up to 3 rounds, with the feedback also passed verbatim to the Coder), or cancels. Decisions are only accepted while the run is actually waiting, so an "approve" can never land on a plan that hasn't been shown yet. Works in Demo Mode too.
 7. **Graceful Cancellation:** "Stop" aborts at the next stage or loop boundary, and immediately interrupts rate-limit and retry waits.
 8. **Retrieval-Augmented Review:** Serious issues from past reviews are stored in a ChromaDB vector store and retrieved for similar new projects (by project description and stack), so recurring mistakes get checked first.
 9. **Diff Viewer:** Snapshots of the Coder's original output let you see exactly what the review loop changed.
